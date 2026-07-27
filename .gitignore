@@ -1,0 +1,8 @@
+node_modules
+build
+.colyseus-cloud.json
+.devmode.json
+# Variáveis de ambiente e credenciais
+.env
+.env.*
+!.env.example
