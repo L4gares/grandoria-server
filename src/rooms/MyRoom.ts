@@ -1,44 +1,29 @@
 import { Room, Client, CloseCode } from "colyseus";
-import { MyRoomState } from "./schema/MyRoomState.js";
+import { MyRoomState, PlayerState } from "./schema/MyRoomState.js";
 
 export class MyRoom extends Room {
-  maxClients = 4;
+  maxClients = 50;
   state = new MyRoomState();
 
-  messages = {
-    yourMessageType: (client: Client, message: any) => {
-      /**
-       * Handle "yourMessageType" message.
-       */
-      console.log(client.sessionId, "sent a message:", message);
-    }
+  onJoin(client: Client) {
+    const player = new PlayerState();
+
+    this.state.players.set(client.sessionId, player);
+
+    console.log(
+      `Jogador ${client.sessionId} entrou. Total: ${this.state.players.size}`
+    );
   }
 
-  onCreate (options: any) {
-    /**
-     * Called when a new room is created.
-     */
-  }
+  onLeave(client: Client, code: CloseCode) {
+    this.state.players.delete(client.sessionId);
 
-  onJoin (client: Client, options: any) {
-    /**
-     * Called when a client joins the room.
-     */
-    console.log(client.sessionId, "joined!");
-  }
-
-  onLeave (client: Client, code: CloseCode) {
-    /**
-     * Called when a client leaves the room.
-     */
-    console.log(client.sessionId, "left!", code);
+    console.log(
+      `Jogador ${client.sessionId} saiu. Código: ${code}. Total: ${this.state.players.size}`
+    );
   }
 
   onDispose() {
-    /**
-     * Called when the room is disposed.
-     */
-    console.log("room", this.roomId, "disposing...");
+    console.log(`Sala ${this.roomId} encerrada.`);
   }
-
 }
