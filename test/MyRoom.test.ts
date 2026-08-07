@@ -7,8 +7,6 @@ import appConfig from "../src/app.config.js";
 import { MyRoom } from "../src/rooms/MyRoom.js";
 
 const ROOM_NAME = "my_room";
-const MONSTER_ID = "map1_hare_001";
-const MONSTER_TYPE = "mob_hare";
 const MAP_ID = "MAP_1";
 const FIXED_TIME_STEP_MS = 1000 / 60;
 const ATTACK_HIT_TICKS = 15;
@@ -16,14 +14,59 @@ const ATTACK_FINISH_TICKS_AFTER_HIT = 5;
 const DEATH_DURATION_MS = 480;
 const RESPAWN_DELAY_MS = 10_000;
 
+type MonsterFixture = {
+  id: string;
+  type: string;
+  mapId: string;
+  x: number;
+  y: number;
+  direction: "up" | "down" | "left" | "right";
+  maxHealth: number;
+  attackPosition: {
+    x: number;
+    y: number;
+    direction: "up" | "down" | "left" | "right";
+  };
+};
+
+const HARE_MONSTER: MonsterFixture = {
+  id: "map1_hare_001",
+  type: "mob_hare",
+  mapId: MAP_ID,
+  x: 168,
+  y: 968,
+  direction: "down",
+  maxHealth: 2,
+  attackPosition: {
+    x: 150,
+    y: 968,
+    direction: "right",
+  },
+};
+
+const BOAR_MONSTER: MonsterFixture = {
+  id: "map1_boar_001",
+  type: "mob_boar",
+  mapId: MAP_ID,
+  x: 144,
+  y: 1056,
+  direction: "down",
+  maxHealth: 10,
+  attackPosition: {
+    x: 144,
+    y: 1032,
+    direction: "down",
+  },
+};
+
 const DEFAULT_JOIN_OPTIONS = {
   playerUid: "test-player",
   characterId: "test-character",
   characterName: "Test Character",
   mapId: MAP_ID,
-  x: 150,
-  y: 968,
-  direction: "right",
+  x: HARE_MONSTER.attackPosition.x,
+  y: HARE_MONSTER.attackPosition.y,
+  direction: HARE_MONSTER.attackPosition.direction,
 };
 
 type JoinOptions = typeof DEFAULT_JOIN_OPTIONS;
@@ -89,24 +132,39 @@ describe("MyRoom authoritative monster combat", () => {
     };
   }
 
+  function getAttackJoinOptions(monster: MonsterFixture): Partial<JoinOptions> {
+    return {
+      mapId: monster.mapId,
+      x: monster.attackPosition.x,
+      y: monster.attackPosition.y,
+      direction: monster.attackPosition.direction,
+    };
+  }
+
   async function performValidHit(
     room: TestableMyRoom,
     client: GrandoriaClient,
+    monster: MonsterFixture = HARE_MONSTER,
   ) {
-    await sendAttack(room, client, { monsterId: MONSTER_ID });
+    await sendAttack(room, client, { monsterId: monster.id });
     advanceFixedTicks(room, ATTACK_HIT_TICKS);
   }
 
   async function killMonster(
     room: TestableMyRoom,
     client: GrandoriaClient,
+    monster: MonsterFixture = HARE_MONSTER,
   ) {
-    await performValidHit(room, client);
-    advanceFixedTicks(room, ATTACK_FINISH_TICKS_AFTER_HIT);
-    await performValidHit(room, client);
+    for (let hit = 0; hit < monster.maxHealth; hit += 1) {
+      await performValidHit(room, client, monster);
+
+      if (hit < monster.maxHealth - 1) {
+        advanceFixedTicks(room, ATTACK_FINISH_TICKS_AFTER_HIT);
+      }
+    }
   }
 
-  it("synchronizes the joined player and initial monster state", async () => {
+  it("synchronizes the joined player and both initial monster types", async () => {
     const { client, room } = await createJoinedRoom();
 
     assert.strictEqual(client.sessionId, room.clients[0].sessionId);
@@ -114,9 +172,11 @@ describe("MyRoom authoritative monster combat", () => {
     await room.waitForNextPatch();
 
     const serverPlayer = room.state.players.get(client.sessionId);
-    const serverMonster = room.state.monsters.get(MONSTER_ID);
+    const serverHare = room.state.monsters.get(HARE_MONSTER.id);
+    const serverBoar = room.state.monsters.get(BOAR_MONSTER.id);
     const syncedPlayer = client.state.players.get(client.sessionId);
-    const syncedMonster = client.state.monsters.get(MONSTER_ID);
+    const syncedHare = client.state.monsters.get(HARE_MONSTER.id);
+    const syncedBoar = client.state.monsters.get(BOAR_MONSTER.id);
 
     assert.ok(serverPlayer);
     assert.strictEqual(serverPlayer.mapId, MAP_ID);
@@ -124,41 +184,90 @@ describe("MyRoom authoritative monster combat", () => {
     assert.strictEqual(serverPlayer.y, DEFAULT_JOIN_OPTIONS.y);
     assert.strictEqual(serverPlayer.direction, DEFAULT_JOIN_OPTIONS.direction);
 
-    assert.ok(serverMonster);
-    assert.strictEqual(serverMonster.monsterType, MONSTER_TYPE);
-    assert.strictEqual(serverMonster.mapId, MAP_ID);
-    assert.strictEqual(serverMonster.x, 168);
-    assert.strictEqual(serverMonster.y, 968);
-    assert.strictEqual(serverMonster.direction, "down");
-    assert.strictEqual(serverMonster.animation, "idle");
-    assert.strictEqual(serverMonster.currentHealth, 2);
-    assert.strictEqual(serverMonster.maxHealth, 2);
-    assert.strictEqual(serverMonster.isAlive, true);
+    assert.ok(serverHare);
+    assert.strictEqual(serverHare.monsterType, HARE_MONSTER.type);
+    assert.strictEqual(serverHare.mapId, HARE_MONSTER.mapId);
+    assert.strictEqual(serverHare.x, HARE_MONSTER.x);
+    assert.strictEqual(serverHare.y, HARE_MONSTER.y);
+    assert.strictEqual(serverHare.direction, HARE_MONSTER.direction);
+    assert.strictEqual(serverHare.animation, "idle");
+    assert.strictEqual(serverHare.currentHealth, HARE_MONSTER.maxHealth);
+    assert.strictEqual(serverHare.maxHealth, HARE_MONSTER.maxHealth);
+    assert.strictEqual(serverHare.isAlive, true);
+
+    assert.ok(serverBoar);
+    assert.strictEqual(serverBoar.monsterType, BOAR_MONSTER.type);
+    assert.strictEqual(serverBoar.mapId, BOAR_MONSTER.mapId);
+    assert.strictEqual(serverBoar.x, BOAR_MONSTER.x);
+    assert.strictEqual(serverBoar.y, BOAR_MONSTER.y);
+    assert.strictEqual(serverBoar.direction, BOAR_MONSTER.direction);
+    assert.strictEqual(serverBoar.animation, "idle");
+    assert.strictEqual(serverBoar.currentHealth, BOAR_MONSTER.maxHealth);
+    assert.strictEqual(serverBoar.maxHealth, BOAR_MONSTER.maxHealth);
+    assert.strictEqual(serverBoar.isAlive, true);
 
     assert.ok(syncedPlayer);
     assert.strictEqual(syncedPlayer.mapId, MAP_ID);
-    assert.ok(syncedMonster);
-    assert.strictEqual(syncedMonster.monsterType, MONSTER_TYPE);
-    assert.strictEqual(syncedMonster.currentHealth, 2);
-    assert.strictEqual(syncedMonster.isAlive, true);
+    assert.ok(syncedHare);
+    assert.strictEqual(syncedHare.monsterType, HARE_MONSTER.type);
+    assert.strictEqual(syncedHare.currentHealth, HARE_MONSTER.maxHealth);
+    assert.strictEqual(syncedHare.isAlive, true);
+    assert.ok(syncedBoar);
+    assert.strictEqual(syncedBoar.monsterType, BOAR_MONSTER.type);
+    assert.strictEqual(syncedBoar.currentHealth, BOAR_MONSTER.maxHealth);
+    assert.strictEqual(syncedBoar.isAlive, true);
   });
 
-  it("damages a monster for a valid attack", async () => {
+  it("damages only the hare for a valid hare attack", async () => {
     const { client, room } = await createJoinedRoom();
 
-    await sendAttack(room, client, { monsterId: MONSTER_ID });
+    await sendAttack(room, client, { monsterId: HARE_MONSTER.id });
     advanceFixedTicks(room, ATTACK_HIT_TICKS - 1);
 
-    assert.strictEqual(room.state.monsters.get(MONSTER_ID)?.currentHealth, 2);
+    assert.strictEqual(
+      room.state.monsters.get(HARE_MONSTER.id)?.currentHealth,
+      HARE_MONSTER.maxHealth,
+    );
 
     advanceFixedTicks(room, 1);
 
-    const monster = room.state.monsters.get(MONSTER_ID);
+    const monster = room.state.monsters.get(HARE_MONSTER.id);
 
     assert.ok(monster);
-    assert.strictEqual(monster.currentHealth, 1);
+    assert.strictEqual(monster.currentHealth, HARE_MONSTER.maxHealth - 1);
     assert.strictEqual(monster.isAlive, true);
     assert.strictEqual(monster.animation, "hurt");
+    assert.strictEqual(
+      room.state.monsters.get(BOAR_MONSTER.id)?.currentHealth,
+      BOAR_MONSTER.maxHealth,
+    );
+  });
+
+  it("damages only the boar for a valid boar attack", async () => {
+    const { client, room } = await createJoinedRoom(
+      getAttackJoinOptions(BOAR_MONSTER),
+    );
+
+    await sendAttack(room, client, { monsterId: BOAR_MONSTER.id });
+    advanceFixedTicks(room, ATTACK_HIT_TICKS - 1);
+
+    assert.strictEqual(
+      room.state.monsters.get(BOAR_MONSTER.id)?.currentHealth,
+      BOAR_MONSTER.maxHealth,
+    );
+
+    advanceFixedTicks(room, 1);
+
+    const monster = room.state.monsters.get(BOAR_MONSTER.id);
+
+    assert.ok(monster);
+    assert.strictEqual(monster.currentHealth, BOAR_MONSTER.maxHealth - 1);
+    assert.strictEqual(monster.isAlive, true);
+    assert.strictEqual(monster.animation, "hurt");
+    assert.strictEqual(
+      room.state.monsters.get(HARE_MONSTER.id)?.currentHealth,
+      HARE_MONSTER.maxHealth,
+    );
   });
 
   it("rejects an attack from a different map", async () => {
@@ -166,7 +275,10 @@ describe("MyRoom authoritative monster combat", () => {
 
     await performValidHit(room, client);
 
-    assert.strictEqual(room.state.monsters.get(MONSTER_ID)?.currentHealth, 2);
+    assert.strictEqual(
+      room.state.monsters.get(HARE_MONSTER.id)?.currentHealth,
+      HARE_MONSTER.maxHealth,
+    );
   });
 
   it("rejects an attack outside the maximum distance", async () => {
@@ -174,7 +286,10 @@ describe("MyRoom authoritative monster combat", () => {
 
     await performValidHit(room, client);
 
-    assert.strictEqual(room.state.monsters.get(MONSTER_ID)?.currentHealth, 2);
+    assert.strictEqual(
+      room.state.monsters.get(HARE_MONSTER.id)?.currentHealth,
+      HARE_MONSTER.maxHealth,
+    );
   });
 
   it("rejects an attack outside the directional hitbox", async () => {
@@ -182,17 +297,23 @@ describe("MyRoom authoritative monster combat", () => {
 
     await performValidHit(room, client);
 
-    assert.strictEqual(room.state.monsters.get(MONSTER_ID)?.currentHealth, 2);
+    assert.strictEqual(
+      room.state.monsters.get(HARE_MONSTER.id)?.currentHealth,
+      HARE_MONSTER.maxHealth,
+    );
   });
 
   it("does not apply repeated attacks during the same attack window", async () => {
     const { client, room } = await createJoinedRoom();
 
-    await sendAttack(room, client, { monsterId: MONSTER_ID });
-    await sendAttack(room, client, { monsterId: MONSTER_ID });
+    await sendAttack(room, client, { monsterId: HARE_MONSTER.id });
+    await sendAttack(room, client, { monsterId: HARE_MONSTER.id });
     advanceFixedTicks(room, ATTACK_HIT_TICKS);
 
-    assert.strictEqual(room.state.monsters.get(MONSTER_ID)?.currentHealth, 1);
+    assert.strictEqual(
+      room.state.monsters.get(HARE_MONSTER.id)?.currentHealth,
+      HARE_MONSTER.maxHealth - 1,
+    );
   });
 
   it("does not let a malformed attack acquire a later repeated target", async () => {
@@ -201,18 +322,37 @@ describe("MyRoom authoritative monster combat", () => {
     await sendAttack(room, client, {
       monsterId: { unexpected: true },
     });
-    await sendAttack(room, client, { monsterId: MONSTER_ID });
+    await sendAttack(room, client, { monsterId: HARE_MONSTER.id });
     advanceFixedTicks(room, ATTACK_HIT_TICKS);
 
-    assert.strictEqual(room.state.monsters.get(MONSTER_ID)?.currentHealth, 2);
+    assert.strictEqual(
+      room.state.monsters.get(HARE_MONSTER.id)?.currentHealth,
+      HARE_MONSTER.maxHealth,
+    );
   });
 
-  it("enters the authoritative death state after lethal damage", async () => {
+  it("rejects an unknown monster id without damaging registered monsters", async () => {
+    const { client, room } = await createJoinedRoom();
+
+    await sendAttack(room, client, { monsterId: "unknown_monster" });
+    advanceFixedTicks(room, ATTACK_HIT_TICKS);
+
+    assert.strictEqual(
+      room.state.monsters.get(HARE_MONSTER.id)?.currentHealth,
+      HARE_MONSTER.maxHealth,
+    );
+    assert.strictEqual(
+      room.state.monsters.get(BOAR_MONSTER.id)?.currentHealth,
+      BOAR_MONSTER.maxHealth,
+    );
+  });
+
+  it("enters the authoritative hare death state after lethal damage", async () => {
     const { client, room } = await createJoinedRoom();
 
     await killMonster(room, client);
 
-    const monster = room.state.monsters.get(MONSTER_ID);
+    const monster = room.state.monsters.get(HARE_MONSTER.id);
 
     assert.ok(monster);
     assert.strictEqual(monster.currentHealth, 0);
@@ -220,7 +360,7 @@ describe("MyRoom authoritative monster combat", () => {
     assert.strictEqual(monster.animation, "death");
   });
 
-  it("removes the monster only after the 480 ms death period", async () => {
+  it("removes the hare only after the 480 ms death period", async () => {
     const { client, room } = await createJoinedRoom();
 
     await killMonster(room, client);
@@ -231,27 +371,27 @@ describe("MyRoom authoritative monster combat", () => {
 
     advanceFixedTicks(room, ticksBeforeRemoval);
 
-    const dyingMonster = room.state.monsters.get(MONSTER_ID);
+    const dyingMonster = room.state.monsters.get(HARE_MONSTER.id);
 
     assert.ok(dyingMonster);
     assert.strictEqual(dyingMonster.animation, "death");
 
     advanceFixedTicks(room, 1);
 
-    assert.strictEqual(room.state.monsters.has(MONSTER_ID), false);
+    assert.strictEqual(room.state.monsters.has(HARE_MONSTER.id), false);
   });
 
-  it("respawns the monster after the configured delay with its spawn state", async () => {
+  it("respawns the hare after the configured delay with its spawn state", async () => {
     const { client, room } = await createJoinedRoom();
 
     await killMonster(room, client);
 
-    const originalMonster = room.state.monsters.get(MONSTER_ID);
+    const originalMonster = room.state.monsters.get(HARE_MONSTER.id);
     const deathTicks = Math.ceil(DEATH_DURATION_MS / FIXED_TIME_STEP_MS);
 
     advanceFixedTicks(room, deathTicks);
 
-    assert.strictEqual(room.state.monsters.has(MONSTER_ID), false);
+    assert.strictEqual(room.state.monsters.has(HARE_MONSTER.id), false);
 
     let respawnTicks = 0;
     const maximumRespawnTicks = Math.ceil(
@@ -259,7 +399,7 @@ describe("MyRoom authoritative monster combat", () => {
     ) + 1;
 
     while (
-      !room.state.monsters.has(MONSTER_ID) &&
+      !room.state.monsters.has(HARE_MONSTER.id) &&
       respawnTicks < maximumRespawnTicks
     ) {
       advanceFixedTicks(room, 1);
@@ -275,18 +415,91 @@ describe("MyRoom authoritative monster combat", () => {
       simulatedRespawnDelay <= RESPAWN_DELAY_MS + FIXED_TIME_STEP_MS,
     );
 
-    const respawnedMonster = room.state.monsters.get(MONSTER_ID);
+    const respawnedMonster = room.state.monsters.get(HARE_MONSTER.id);
 
     assert.ok(respawnedMonster);
     assert.notStrictEqual(respawnedMonster, originalMonster);
-    assert.strictEqual(respawnedMonster.monsterType, MONSTER_TYPE);
-    assert.strictEqual(respawnedMonster.mapId, MAP_ID);
-    assert.strictEqual(respawnedMonster.x, 168);
-    assert.strictEqual(respawnedMonster.y, 968);
-    assert.strictEqual(respawnedMonster.direction, "down");
+    assert.strictEqual(respawnedMonster.monsterType, HARE_MONSTER.type);
+    assert.strictEqual(respawnedMonster.mapId, HARE_MONSTER.mapId);
+    assert.strictEqual(respawnedMonster.x, HARE_MONSTER.x);
+    assert.strictEqual(respawnedMonster.y, HARE_MONSTER.y);
+    assert.strictEqual(respawnedMonster.direction, HARE_MONSTER.direction);
     assert.strictEqual(respawnedMonster.animation, "idle");
-    assert.strictEqual(respawnedMonster.currentHealth, 2);
-    assert.strictEqual(respawnedMonster.maxHealth, 2);
+    assert.strictEqual(respawnedMonster.currentHealth, HARE_MONSTER.maxHealth);
+    assert.strictEqual(respawnedMonster.maxHealth, HARE_MONSTER.maxHealth);
     assert.strictEqual(respawnedMonster.isAlive, true);
+  });
+
+  it("kills, removes, and respawns the boar through the shared lifecycle", async () => {
+    const { client, room } = await createJoinedRoom(
+      getAttackJoinOptions(BOAR_MONSTER),
+    );
+    const originalBoar = room.state.monsters.get(BOAR_MONSTER.id);
+
+    assert.ok(originalBoar);
+
+    await killMonster(room, client, BOAR_MONSTER);
+
+    const deadBoar = room.state.monsters.get(BOAR_MONSTER.id);
+
+    assert.ok(deadBoar);
+    assert.strictEqual(deadBoar.currentHealth, 0);
+    assert.strictEqual(deadBoar.isAlive, false);
+    assert.strictEqual(deadBoar.animation, "death");
+    assert.strictEqual(
+      room.state.monsters.get(HARE_MONSTER.id)?.currentHealth,
+      HARE_MONSTER.maxHealth,
+    );
+
+    const ticksBeforeRemoval = Math.floor(
+      DEATH_DURATION_MS / FIXED_TIME_STEP_MS,
+    );
+
+    advanceFixedTicks(room, ticksBeforeRemoval);
+
+    const dyingBoar = room.state.monsters.get(BOAR_MONSTER.id);
+
+    assert.ok(dyingBoar);
+    assert.strictEqual(dyingBoar.animation, "death");
+
+    advanceFixedTicks(room, 1);
+
+    assert.strictEqual(room.state.monsters.has(BOAR_MONSTER.id), false);
+
+    let respawnTicks = 0;
+    const maximumRespawnTicks = Math.ceil(
+      RESPAWN_DELAY_MS / FIXED_TIME_STEP_MS,
+    ) + 1;
+
+    while (
+      !room.state.monsters.has(BOAR_MONSTER.id) &&
+      respawnTicks < maximumRespawnTicks
+    ) {
+      advanceFixedTicks(room, 1);
+      respawnTicks += 1;
+    }
+
+    const simulatedRespawnDelay = respawnTicks * FIXED_TIME_STEP_MS;
+
+    assert.ok(
+      simulatedRespawnDelay >= RESPAWN_DELAY_MS - FIXED_TIME_STEP_MS,
+    );
+    assert.ok(
+      simulatedRespawnDelay <= RESPAWN_DELAY_MS + FIXED_TIME_STEP_MS,
+    );
+
+    const respawnedBoar = room.state.monsters.get(BOAR_MONSTER.id);
+
+    assert.ok(respawnedBoar);
+    assert.notStrictEqual(respawnedBoar, originalBoar);
+    assert.strictEqual(respawnedBoar.monsterType, BOAR_MONSTER.type);
+    assert.strictEqual(respawnedBoar.mapId, BOAR_MONSTER.mapId);
+    assert.strictEqual(respawnedBoar.x, BOAR_MONSTER.x);
+    assert.strictEqual(respawnedBoar.y, BOAR_MONSTER.y);
+    assert.strictEqual(respawnedBoar.direction, BOAR_MONSTER.direction);
+    assert.strictEqual(respawnedBoar.animation, "idle");
+    assert.strictEqual(respawnedBoar.currentHealth, BOAR_MONSTER.maxHealth);
+    assert.strictEqual(respawnedBoar.maxHealth, BOAR_MONSTER.maxHealth);
+    assert.strictEqual(respawnedBoar.isAlive, true);
   });
 });

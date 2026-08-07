@@ -91,21 +91,54 @@ type Hitbox = {
   maxY: number;
 };
 
+type HitboxOffsets = Hitbox;
+
 type MonsterDefinition = {
   maxHealth: number;
+  hurtDurationMs: number;
   deathDurationMs: number;
   respawnDelayMs: number;
+  hitboxOffsets: HitboxOffsets;
 };
 
 const MONSTER_DEFINITIONS = {
   mob_hare: {
     maxHealth: 2,
+    hurtDurationMs: 320,
     deathDurationMs: 480,
     respawnDelayMs: 10_000,
+    hitboxOffsets: {
+      minX: -6.5,
+      maxX: 7,
+      minY: -9.5,
+      maxY: 2.5,
+    },
+  },
+  mob_boar: {
+    maxHealth: 10,
+    hurtDurationMs: 320,
+    deathDurationMs: 480,
+    respawnDelayMs: 10_000,
+    hitboxOffsets: {
+      minX: -6.5,
+      maxX: 5.5,
+      minY: -15,
+      maxY: -3.5,
+    },
   },
 } satisfies Record<string, MonsterDefinition>;
 
 type MonsterType = keyof typeof MONSTER_DEFINITIONS;
+
+function getMonsterDefinition(
+  monsterType: string,
+): MonsterDefinition | undefined {
+  if (!Object.prototype.hasOwnProperty.call(MONSTER_DEFINITIONS, monsterType)) {
+    return undefined;
+  }
+
+  return MONSTER_DEFINITIONS[monsterType as MonsterType];
+}
 
 type MonsterSpawn = {
   monsterId: string;
@@ -126,6 +159,14 @@ const MONSTER_SPAWNS: readonly MonsterSpawn[] = [
     mapId: "MAP_1",
     x: 168,
     y: 968,
+    direction: "down",
+  },
+  {
+    monsterId: "map1_boar_001",
+    monsterType: "mob_boar",
+    mapId: "MAP_1",
+    x: 144,
+    y: 1056,
     direction: "down",
   },
 ];
@@ -160,12 +201,6 @@ const PLAYER_ATTACK_DAMAGE = 1;
  * The directional hitbox is even smaller.
  */
 const MAX_PLAYER_ATTACK_DISTANCE = 40;
-
-/*
- * Four frames at 0.08 seconds each for
- * the mob_hare hurt animation.
- */
-const MONSTER_HURT_DURATION_MS = 320;
 
 function createIdleInput(): PlayerInput {
   return {
@@ -305,12 +340,17 @@ function getPlayerAttackHitbox(player: PlayerState): Hitbox {
   }
 }
 
-function getMonsterHitbox(monster: MonsterState): Hitbox {
+function getMonsterHitbox(
+  monster: MonsterState,
+  definition: MonsterDefinition,
+): Hitbox {
+  const offsets = definition.hitboxOffsets;
+
   return {
-    minX: monster.x - 6.5,
-    maxX: monster.x + 7,
-    minY: monster.y - 9.5,
-    maxY: monster.y + 2.5,
+    minX: monster.x + offsets.minX,
+    maxX: monster.x + offsets.maxX,
+    minY: monster.y + offsets.minY,
+    maxY: monster.y + offsets.maxY,
   };
 }
 
@@ -875,7 +915,20 @@ export class MyRoom extends Room<{
 
     const attackHitbox = getPlayerAttackHitbox(player);
 
-    const monsterHitbox = getMonsterHitbox(monster);
+    const monsterDefinition = getMonsterDefinition(monster.monsterType);
+
+    if (!monsterDefinition) {
+      console.error("[Grandoria] Attack rejected:", {
+        sessionId,
+        monsterId,
+        monsterType: monster.monsterType,
+        reason: "monster_definition_not_found",
+      });
+
+      return;
+    }
+
+    const monsterHitbox = getMonsterHitbox(monster, monsterDefinition);
 
     if (!hitboxesIntersect(attackHitbox, monsterHitbox)) {
       console.log("[Grandoria] Attack missed:", {
@@ -910,7 +963,10 @@ export class MyRoom extends Room<{
     } else {
       monster.animation = "hurt";
 
-      this.monsterHurtRemaining.set(monsterId, MONSTER_HURT_DURATION_MS);
+      this.monsterHurtRemaining.set(
+        monsterId,
+        monsterDefinition.hurtDurationMs,
+      );
     }
 
     console.log(`[Grandoria] Monster ${monsterId} took damage.`, {
