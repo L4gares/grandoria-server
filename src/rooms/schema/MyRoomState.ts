@@ -74,6 +74,15 @@ export class PlayerState extends Schema {
   @type("string")
   mapId: string = "";
 
+  @type("number")
+  currentHealth: number = 50;
+
+  @type("number")
+  maxHealth: number = 50;
+
+  @type("boolean")
+  isAlive: boolean = true;
+
   @type(PlayerAppearanceState)
   appearance = new PlayerAppearanceState();
 

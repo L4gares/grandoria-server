@@ -7,6 +7,13 @@ import {
   PlayerEquipmentSlotState,
 } from "./schema/MyRoomState.js";
 
+import {
+  normalizeWorldMapId,
+  resolveMonsterMovement,
+  resolvePlayerMovement,
+  resolvePlayerSpawn,
+} from "../world/WorldCollision.js";
+
 type InputMessage = {
   left?: unknown;
   right?: unknown;
@@ -93,17 +100,42 @@ type Hitbox = {
 
 type HitboxOffsets = Hitbox;
 
+type MonsterAttackDefinition = {
+  damage: number;
+  range: number;
+  hitDelayMs: number;
+  durationMs: number;
+  intervalMs: number;
+};
+
 type MonsterDefinition = {
+  bodyProfileId: string;
   maxHealth: number;
+  movementSpeed: number;
+  reactionSpeed: number;
+  patrolRadius: number;
+  reactionMode: "flee" | "chase";
+  detectionRadius: number;
+  disengageRadius: number;
+  targetStopDistance: number;
   hurtDurationMs: number;
   deathDurationMs: number;
   respawnDelayMs: number;
   hitboxOffsets: HitboxOffsets;
+  attack?: MonsterAttackDefinition;
 };
 
 const MONSTER_DEFINITIONS = {
   mob_hare: {
+    bodyProfileId: "mob_hare",
     maxHealth: 2,
+    movementSpeed: 25,
+    reactionSpeed: 45,
+    patrolRadius: 96,
+    reactionMode: "flee",
+    detectionRadius: 128,
+    disengageRadius: 192,
+    targetStopDistance: 0,
     hurtDurationMs: 320,
     deathDurationMs: 480,
     respawnDelayMs: 10_000,
@@ -115,7 +147,15 @@ const MONSTER_DEFINITIONS = {
     },
   },
   mob_boar: {
+    bodyProfileId: "mob_boar",
     maxHealth: 10,
+    movementSpeed: 15,
+    reactionSpeed: 50,
+    patrolRadius: 96,
+    reactionMode: "chase",
+    detectionRadius: 128,
+    disengageRadius: 192,
+    targetStopDistance: 16,
     hurtDurationMs: 320,
     deathDurationMs: 480,
     respawnDelayMs: 10_000,
@@ -125,10 +165,43 @@ const MONSTER_DEFINITIONS = {
       minY: -15,
       maxY: -3.5,
     },
+    attack: {
+      damage: 7,
+      range: 32,
+      hitDelayMs: 240,
+      durationMs: 400,
+      intervalMs: 2_000,
+    },
   },
 } satisfies Record<string, MonsterDefinition>;
 
 type MonsterType = keyof typeof MONSTER_DEFINITIONS;
+
+type MonsterDirection = "up" | "down" | "left" | "right";
+
+type MonsterPatrolState = {
+  direction: MonsterDirection | null;
+  remainingMs: number;
+};
+
+type MonsterReactionState =
+  | {
+      mode: "react";
+      targetSessionId: string;
+    }
+  | {
+      mode: "return";
+    };
+
+type MonsterTarget = {
+  distance: number;
+  sessionId: string;
+};
+
+type MonsterAttackState = {
+  targetSessionId: string;
+  remainingMs: number;
+};
 
 function getMonsterDefinition(
   monsterType: string,
@@ -146,11 +219,31 @@ type MonsterSpawn = {
   mapId: string;
   x: number;
   y: number;
-  direction: "up" | "down" | "left" | "right";
+  direction: MonsterDirection;
 };
 
 const PLAYER_SPEED = 90;
+const PLAYER_MAX_HEALTH = 50;
+const PLAYER_RESPAWN_DELAY_MS = 3_000;
+const PLAYER_RESPAWN_HEALTH_RATIO = 0.5;
+const PLAYER_RESPAWN_POINTS = [
+  { mapId: "MAP_1", x: 728, y: 1362 },
+  { mapId: "MAP_1", x: 796, y: 1394 },
+  { mapId: "MAP_1", x: 889, y: 1402 },
+] as const;
 const FIXED_TIME_STEP = 1000 / 60;
+const MONSTER_PATROL_MIN_DURATION_MS = 2_000;
+const MONSTER_PATROL_MAX_DURATION_MS = 10_000;
+const MONSTER_PATROL_WALK_CHANCE = 0.8;
+const MONSTER_HOME_ARRIVAL_EPSILON = 0.01;
+const TIMER_EPSILON_MS = 0.0001;
+
+const MONSTER_PATROL_DIRECTIONS: readonly MonsterDirection[] = [
+  "down",
+  "left",
+  "right",
+  "up",
+];
 
 const MONSTER_SPAWNS: readonly MonsterSpawn[] = [
   {
@@ -209,6 +302,14 @@ function createIdleInput(): PlayerInput {
     up: false,
     down: false,
   };
+}
+
+function clampUnitInterval(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.min(1, Math.max(0, value));
 }
 
 function readSafeString(value: unknown, maxLength: number): string {
@@ -497,6 +598,8 @@ export class MyRoom extends Room<{
 
   private readonly playerInputs = new Map<string, PlayerInput>();
 
+  private readonly playerCollisionBlocks = new Set<string>();
+
   private readonly playerIdentities = new Map<string, PlayerIdentity>();
 
   /*
@@ -512,11 +615,34 @@ export class MyRoom extends Room<{
    */
   private readonly playerAttackTargets = new Map<string, string>();
 
+  private readonly playerRespawnRemaining = new Map<string, number>();
+
   private readonly monsterHurtRemaining = new Map<string, number>();
 
   private readonly monsterDeathRemaining = new Map<string, number>();
 
   private readonly monsterRespawnRemaining = new Map<string, number>();
+
+  private readonly monsterPatrolStates = new Map<
+    string,
+    MonsterPatrolState
+  >();
+
+  private readonly monsterReactionStates = new Map<
+    string,
+    MonsterReactionState
+  >();
+
+  private readonly monsterAttackStates = new Map<
+    string,
+    MonsterAttackState
+  >();
+
+  private readonly monsterAttackCooldownRemaining = new Map<string, number>();
+
+  private readonly monstersPendingRespawnIdleTick = new Set<string>();
+
+  private monsterRandom: () => number = Math.random;
 
   messages = {
     input: (client: Client, message: InputMessage) => {
@@ -530,7 +656,9 @@ export class MyRoom extends Room<{
         return;
       }
 
-      if (!this.state.players.has(client.sessionId)) {
+      const player = this.state.players.get(client.sessionId);
+
+      if (!player || !player.isAlive || player.currentHealth <= 0) {
         return;
       }
 
@@ -545,7 +673,7 @@ export class MyRoom extends Room<{
     attack: (client: Client, message?: AttackMessage) => {
       const player = this.state.players.get(client.sessionId);
 
-      if (!player) {
+      if (!player || !player.isAlive || player.currentHealth <= 0) {
         return;
       }
 
@@ -584,6 +712,8 @@ export class MyRoom extends Room<{
        * ignored until the attack has finished.
        */
       this.playerInputs.set(client.sessionId, createIdleInput());
+
+      this.playerCollisionBlocks.delete(client.sessionId);
 
       player.animation = "attack";
     },
@@ -643,13 +773,28 @@ export class MyRoom extends Room<{
   }
 
   private fixedTick(deltaTime: number) {
+    this.updatePlayerLifecycle(deltaTime);
+
     this.updateMonsterLifecycle(deltaTime);
 
     this.updateMonsterHurtAnimations(deltaTime);
 
+    this.updateMonsterAttackCooldowns(deltaTime);
+
+    this.updateMonsterBehavior(deltaTime);
+
     const distance = PLAYER_SPEED * (deltaTime / 1000);
 
     this.state.players.forEach((player, sessionId) => {
+      if (!player.isAlive || player.currentHealth <= 0) {
+        this.playerInputs.set(sessionId, createIdleInput());
+        this.playerCollisionBlocks.delete(sessionId);
+        this.playerAttackRemaining.delete(sessionId);
+        this.playerAttackTargets.delete(sessionId);
+        player.animation = "death";
+        return;
+      }
+
       const attackRemaining = this.playerAttackRemaining.get(sessionId);
 
       /*
@@ -657,6 +802,8 @@ export class MyRoom extends Room<{
        * the player still and preserves direction.
        */
       if (attackRemaining !== undefined) {
+        this.playerCollisionBlocks.delete(sessionId);
+
         const nextAttackRemaining = attackRemaining - deltaTime;
 
         if (
@@ -690,6 +837,8 @@ export class MyRoom extends Room<{
       const input = this.playerInputs.get(sessionId);
 
       if (!input) {
+        this.playerCollisionBlocks.delete(sessionId);
+
         player.animation = "idle";
         return;
       }
@@ -699,6 +848,8 @@ export class MyRoom extends Room<{
       let moveY = Number(input.down) - Number(input.up);
 
       if (moveX === 0 && moveY === 0) {
+        this.playerCollisionBlocks.delete(sessionId);
+
         player.animation = "idle";
         return;
       }
@@ -708,21 +859,118 @@ export class MyRoom extends Room<{
         moveY *= Math.SQRT1_2;
       }
 
-      player.x += moveX * distance;
+      const movement = resolvePlayerMovement(
+        player.mapId,
+        player.x,
+        player.y,
+        moveX * distance,
+        moveY * distance,
+      );
 
-      player.y += moveY * distance;
+      const moved = movement.x !== player.x || movement.y !== player.y;
+      const blocked = movement.blockedX || movement.blockedY;
 
-      player.animation = "walk";
+      player.x = movement.x;
 
-      if (moveY < 0) {
-        player.direction = "up";
-      } else if (moveY > 0) {
-        player.direction = "down";
-      } else if (moveX < 0) {
+      player.y = movement.y;
+
+      player.animation = moved ? "walk" : "idle";
+
+      if (blocked && !this.playerCollisionBlocks.has(sessionId)) {
+        this.playerCollisionBlocks.add(sessionId);
+
+        console.log("[Grandoria] Movement blocked by world collision:", {
+          sessionId,
+          mapId: player.mapId,
+          blockedX: movement.blockedX,
+          blockedY: movement.blockedY,
+          position: {
+            x: player.x,
+            y: player.y,
+          },
+        });
+      } else if (!blocked) {
+        this.playerCollisionBlocks.delete(sessionId);
+      }
+
+      if (moveX < 0) {
         player.direction = "left";
       } else if (moveX > 0) {
         player.direction = "right";
+      } else if (moveY < 0) {
+        player.direction = "up";
+      } else if (moveY > 0) {
+        player.direction = "down";
       }
+    });
+  }
+
+  private updatePlayerLifecycle(deltaTime: number) {
+    this.playerRespawnRemaining.forEach((remaining, sessionId) => {
+      const player = this.state.players.get(sessionId);
+
+      if (!player) {
+        this.playerRespawnRemaining.delete(sessionId);
+        return;
+      }
+
+      if (player.isAlive && player.currentHealth > 0) {
+        this.playerRespawnRemaining.delete(sessionId);
+        return;
+      }
+
+      const nextRemaining = remaining - deltaTime;
+
+      if (nextRemaining > TIMER_EPSILON_MS) {
+        this.playerRespawnRemaining.set(sessionId, nextRemaining);
+        player.animation = "death";
+        return;
+      }
+
+      const identity = this.playerIdentities.get(sessionId);
+
+      if (!identity) {
+        this.playerRespawnRemaining.delete(sessionId);
+        return;
+      }
+
+      const requestedSpawn =
+        PLAYER_RESPAWN_POINTS[
+          Math.floor(Math.random() * PLAYER_RESPAWN_POINTS.length)
+        ] ?? PLAYER_RESPAWN_POINTS[0];
+
+      const spawn = resolvePlayerSpawn(
+        requestedSpawn.mapId,
+        requestedSpawn.x,
+        requestedSpawn.y,
+      );
+
+      identity.mapId = requestedSpawn.mapId;
+      player.mapId = requestedSpawn.mapId;
+      player.x = spawn.x;
+      player.y = spawn.y;
+      player.direction = "down";
+      player.currentHealth = Math.max(
+        1,
+        Math.floor(player.maxHealth * PLAYER_RESPAWN_HEALTH_RATIO),
+      );
+      player.isAlive = true;
+      player.animation = "idle";
+
+      this.playerInputs.set(sessionId, createIdleInput());
+      this.playerCollisionBlocks.delete(sessionId);
+      this.playerAttackRemaining.delete(sessionId);
+      this.playerAttackTargets.delete(sessionId);
+      this.playerRespawnRemaining.delete(sessionId);
+
+      console.log(`[Grandoria] Player ${sessionId} respawned.`, {
+        mapId: player.mapId,
+        position: {
+          x: player.x,
+          y: player.y,
+        },
+        health: `${player.currentHealth}/${player.maxHealth}`,
+      });
     });
   }
 
@@ -744,6 +992,18 @@ export class MyRoom extends Room<{
     monster.currentHealth = definition.maxHealth;
     monster.maxHealth = definition.maxHealth;
     monster.isAlive = true;
+
+    this.monsterPatrolStates.delete(spawn.monsterId);
+
+    this.monsterReactionStates.delete(spawn.monsterId);
+
+    this.monsterAttackStates.delete(spawn.monsterId);
+
+    this.monsterAttackCooldownRemaining.delete(spawn.monsterId);
+
+    if (reason === "respawn") {
+      this.monstersPendingRespawnIdleTick.add(spawn.monsterId);
+    }
 
     this.state.monsters.set(spawn.monsterId, monster);
 
@@ -779,6 +1039,16 @@ export class MyRoom extends Room<{
       }
 
       this.monsterDeathRemaining.delete(monsterId);
+
+      this.monsterPatrolStates.delete(monsterId);
+
+      this.monsterReactionStates.delete(monsterId);
+
+      this.monsterAttackStates.delete(monsterId);
+
+      this.monsterAttackCooldownRemaining.delete(monsterId);
+
+      this.monstersPendingRespawnIdleTick.delete(monsterId);
 
       this.state.monsters.delete(monsterId);
 
@@ -857,6 +1127,676 @@ export class MyRoom extends Room<{
       this.monsterHurtRemaining.delete(monsterId);
 
       monster.animation = "idle";
+    });
+  }
+
+  private updateMonsterAttackCooldowns(deltaTime: number) {
+    this.monsterAttackCooldownRemaining.forEach((remaining, monsterId) => {
+      const nextRemaining = remaining - deltaTime;
+
+      if (nextRemaining > TIMER_EPSILON_MS) {
+        this.monsterAttackCooldownRemaining.set(monsterId, nextRemaining);
+        return;
+      }
+
+      this.monsterAttackCooldownRemaining.delete(monsterId);
+    });
+  }
+
+  private startMonsterAttack(
+    monsterId: string,
+    monster: MonsterState,
+    targetSessionId: string,
+    target: PlayerState,
+    attack: MonsterAttackDefinition,
+  ) {
+    this.faceMonsterTowardVector(
+      monster,
+      target.x - monster.x,
+      target.y - monster.y,
+    );
+
+    this.monsterPatrolStates.delete(monsterId);
+
+    this.monsterAttackStates.set(monsterId, {
+      targetSessionId,
+      remainingMs: attack.durationMs,
+    });
+
+    this.monsterAttackCooldownRemaining.set(monsterId, attack.intervalMs);
+
+    monster.animation = "attack";
+
+    console.log("[Grandoria] Monster attack started:", {
+      monsterId,
+      targetSessionId,
+      distance: Math.hypot(target.x - monster.x, target.y - monster.y),
+      range: attack.range,
+    });
+  }
+
+  private updateMonsterAttack(
+    monsterId: string,
+    monster: MonsterState,
+    attackState: MonsterAttackState,
+    attack: MonsterAttackDefinition,
+    deltaTime: number,
+  ) {
+    const target = this.state.players.get(attackState.targetSessionId);
+
+    if (
+      target &&
+      target.isAlive &&
+      target.currentHealth > 0 &&
+      target.mapId === monster.mapId
+    ) {
+      this.faceMonsterTowardVector(
+        monster,
+        target.x - monster.x,
+        target.y - monster.y,
+      );
+    }
+
+    const nextRemaining = attackState.remainingMs - deltaTime;
+    const hitRemaining = Math.max(0, attack.durationMs - attack.hitDelayMs);
+
+    if (
+      attackState.remainingMs > hitRemaining &&
+      nextRemaining <= hitRemaining
+    ) {
+      this.applyMonsterAttackToPlayer(
+        monsterId,
+        monster,
+        attackState.targetSessionId,
+        attack,
+      );
+    }
+
+    if (nextRemaining > TIMER_EPSILON_MS) {
+      attackState.remainingMs = nextRemaining;
+      monster.animation = "attack";
+      return;
+    }
+
+    this.monsterAttackStates.delete(monsterId);
+    monster.animation = "idle";
+  }
+
+  private applyMonsterAttackToPlayer(
+    monsterId: string,
+    monster: MonsterState,
+    targetSessionId: string,
+    attack: MonsterAttackDefinition,
+  ) {
+    const player = this.state.players.get(targetSessionId);
+
+    if (
+      !player ||
+      !player.isAlive ||
+      player.currentHealth <= 0 ||
+      player.mapId !== monster.mapId
+    ) {
+      return;
+    }
+
+    const distance = Math.hypot(player.x - monster.x, player.y - monster.y);
+
+    if (distance > attack.range) {
+      return;
+    }
+
+    const previousHealth = player.currentHealth;
+
+    player.currentHealth = Math.max(0, previousHealth - attack.damage);
+
+    if (player.currentHealth === 0) {
+      player.isAlive = false;
+      player.animation = "death";
+
+      this.playerInputs.set(targetSessionId, createIdleInput());
+      this.playerCollisionBlocks.delete(targetSessionId);
+      this.playerAttackRemaining.delete(targetSessionId);
+      this.playerAttackTargets.delete(targetSessionId);
+      this.playerRespawnRemaining.set(
+        targetSessionId,
+        PLAYER_RESPAWN_DELAY_MS,
+      );
+    }
+
+    console.log(`[Grandoria] Player ${targetSessionId} took damage.`, {
+      monsterId,
+      monsterType: monster.monsterType,
+      damage: attack.damage,
+      previousHealth,
+      currentHealth: player.currentHealth,
+      isAlive: player.isAlive,
+    });
+  }
+
+  private createMonsterPatrolState(
+    monster: MonsterState,
+  ): MonsterPatrolState {
+    const durationRandom = clampUnitInterval(this.monsterRandom());
+
+    const remainingMs =
+      MONSTER_PATROL_MIN_DURATION_MS +
+      durationRandom *
+        (MONSTER_PATROL_MAX_DURATION_MS - MONSTER_PATROL_MIN_DURATION_MS);
+
+    const shouldWalk =
+      clampUnitInterval(this.monsterRandom()) < MONSTER_PATROL_WALK_CHANCE;
+
+    if (!shouldWalk) {
+      return {
+        direction: null,
+        remainingMs,
+      };
+    }
+
+    const directionRandom = clampUnitInterval(this.monsterRandom());
+
+    const directionIndex = Math.min(
+      MONSTER_PATROL_DIRECTIONS.length - 1,
+      Math.floor(directionRandom * MONSTER_PATROL_DIRECTIONS.length),
+    );
+
+    const direction = MONSTER_PATROL_DIRECTIONS[directionIndex];
+
+    monster.direction = direction;
+
+    return {
+      direction,
+      remainingMs,
+    };
+  }
+
+  private findClosestMonsterTarget(
+    monster: MonsterState,
+    detectionRadius: number,
+  ): MonsterTarget | undefined {
+    let closestTarget: MonsterTarget | undefined;
+
+    this.state.players.forEach((player, sessionId) => {
+      if (
+        !player.isAlive ||
+        player.currentHealth <= 0 ||
+        player.mapId !== monster.mapId
+      ) {
+        return;
+      }
+
+      const distance = Math.hypot(player.x - monster.x, player.y - monster.y);
+
+      if (
+        distance > detectionRadius ||
+        (closestTarget && distance >= closestTarget.distance)
+      ) {
+        return;
+      }
+
+      closestTarget = {
+        distance,
+        sessionId,
+      };
+    });
+
+    return closestTarget;
+  }
+
+  private hasPendingValidAttackOnMonster(
+    monsterId: string,
+    monster: MonsterState,
+    definition: MonsterDefinition,
+  ): boolean {
+    let hasPendingAttack = false;
+
+    this.playerAttackTargets.forEach((targetMonsterId, sessionId) => {
+      if (
+        hasPendingAttack ||
+        targetMonsterId !== monsterId ||
+        !this.playerAttackRemaining.has(sessionId)
+      ) {
+        return;
+      }
+
+      const player = this.state.players.get(sessionId);
+
+      if (!player || player.mapId !== monster.mapId) {
+        return;
+      }
+
+      const distance = Math.hypot(monster.x - player.x, monster.y - player.y);
+
+      if (distance > MAX_PLAYER_ATTACK_DISTANCE) {
+        return;
+      }
+
+      hasPendingAttack = hitboxesIntersect(
+        getPlayerAttackHitbox(player),
+        getMonsterHitbox(monster, definition),
+      );
+    });
+
+    return hasPendingAttack;
+  }
+
+  private faceMonsterTowardVector(
+    monster: MonsterState,
+    vectorX: number,
+    vectorY: number,
+  ) {
+    if (Math.abs(vectorX) >= Math.abs(vectorY) && vectorX !== 0) {
+      monster.direction = vectorX < 0 ? "left" : "right";
+    } else if (vectorY !== 0) {
+      monster.direction = vectorY < 0 ? "up" : "down";
+    }
+  }
+
+  private moveMonsterAlongVector(
+    monster: MonsterState,
+    definition: MonsterDefinition,
+    vectorX: number,
+    vectorY: number,
+    maximumDistance: number,
+    movementAnimation: "walk" | "run" = "walk",
+  ) {
+    const vectorLength = Math.hypot(vectorX, vectorY);
+
+    this.faceMonsterTowardVector(monster, vectorX, vectorY);
+
+    if (vectorLength <= 0 || maximumDistance <= 0) {
+      monster.animation = "idle";
+      return;
+    }
+
+    const deltaX = (vectorX / vectorLength) * maximumDistance;
+    const deltaY = (vectorY / vectorLength) * maximumDistance;
+
+    const movement = resolveMonsterMovement(
+      monster.mapId,
+      definition.bodyProfileId,
+      monster.x,
+      monster.y,
+      deltaX,
+      deltaY,
+    );
+
+    const moved = movement.x !== monster.x || movement.y !== monster.y;
+
+    monster.x = movement.x;
+    monster.y = movement.y;
+    monster.animation = moved ? movementAnimation : "idle";
+  }
+
+  private updateMonsterReturn(
+    monsterId: string,
+    monster: MonsterState,
+    spawn: MonsterSpawn,
+    definition: MonsterDefinition,
+    deltaTime: number,
+  ) {
+    const vectorX = spawn.x - monster.x;
+    const vectorY = spawn.y - monster.y;
+    const distanceFromSpawn = Math.hypot(vectorX, vectorY);
+
+    if (distanceFromSpawn <= MONSTER_HOME_ARRIVAL_EPSILON) {
+      monster.x = spawn.x;
+      monster.y = spawn.y;
+      monster.direction = spawn.direction;
+      monster.animation = "idle";
+
+      this.monsterReactionStates.delete(monsterId);
+      this.monsterPatrolStates.delete(monsterId);
+      return;
+    }
+
+    const movementDistance = Math.min(
+      definition.movementSpeed * (deltaTime / 1000),
+      distanceFromSpawn,
+    );
+
+    this.moveMonsterAlongVector(
+      monster,
+      definition,
+      vectorX,
+      vectorY,
+      movementDistance,
+    );
+
+    if (
+      Math.hypot(monster.x - spawn.x, monster.y - spawn.y) <=
+      MONSTER_HOME_ARRIVAL_EPSILON
+    ) {
+      monster.x = spawn.x;
+      monster.y = spawn.y;
+      monster.direction = spawn.direction;
+      monster.animation = "idle";
+
+      this.monsterReactionStates.delete(monsterId);
+      this.monsterPatrolStates.delete(monsterId);
+    }
+  }
+
+  private updateMonsterReaction(
+    monsterId: string,
+    monster: MonsterState,
+    spawn: MonsterSpawn,
+    definition: MonsterDefinition,
+    reactionState: Extract<MonsterReactionState, { mode: "react" }>,
+    deltaTime: number,
+  ) {
+    const target = this.state.players.get(reactionState.targetSessionId);
+
+    const targetDistance = target
+      ? Math.hypot(target.x - monster.x, target.y - monster.y)
+      : Number.POSITIVE_INFINITY;
+
+    const distanceFromSpawn = Math.hypot(
+      monster.x - spawn.x,
+      monster.y - spawn.y,
+    );
+
+    if (
+      !target ||
+      !target.isAlive ||
+      target.currentHealth <= 0 ||
+      target.mapId !== monster.mapId ||
+      targetDistance > definition.disengageRadius ||
+      distanceFromSpawn >= definition.disengageRadius
+    ) {
+      this.monsterReactionStates.set(monsterId, { mode: "return" });
+
+      this.updateMonsterReturn(
+        monsterId,
+        monster,
+        spawn,
+        definition,
+        deltaTime,
+      );
+      return;
+    }
+
+    if (
+      definition.reactionMode === "chase" &&
+      definition.attack &&
+      targetDistance <= definition.attack.range &&
+      !this.monsterAttackCooldownRemaining.has(monsterId)
+    ) {
+      this.startMonsterAttack(
+        monsterId,
+        monster,
+        reactionState.targetSessionId,
+        target,
+        definition.attack,
+      );
+      return;
+    }
+
+    let vectorX = target.x - monster.x;
+    let vectorY = target.y - monster.y;
+
+    if (definition.reactionMode === "flee") {
+      vectorX *= -1;
+      vectorY *= -1;
+
+      if (vectorX === 0 && vectorY === 0) {
+        switch (monster.direction) {
+          case "left":
+            vectorX = -1;
+            break;
+
+          case "right":
+            vectorX = 1;
+            break;
+
+          case "up":
+            vectorY = -1;
+            break;
+
+          case "down":
+          default:
+            vectorY = 1;
+            break;
+        }
+      }
+    }
+
+    const maximumMovementDistance =
+      definition.reactionSpeed * (deltaTime / 1000);
+
+    const movementDistance =
+      definition.reactionMode === "flee"
+        ? maximumMovementDistance
+        : Math.min(
+            maximumMovementDistance,
+            Math.max(0, targetDistance - definition.targetStopDistance),
+          );
+
+    const vectorLength = Math.hypot(vectorX, vectorY);
+    const requestedX =
+      vectorLength > 0
+        ? monster.x + (vectorX / vectorLength) * movementDistance
+        : monster.x;
+    const requestedY =
+      vectorLength > 0
+        ? monster.y + (vectorY / vectorLength) * movementDistance
+        : monster.y;
+
+    if (
+      Math.hypot(requestedX - spawn.x, requestedY - spawn.y) >
+      definition.disengageRadius
+    ) {
+      this.monsterReactionStates.set(monsterId, { mode: "return" });
+
+      this.updateMonsterReturn(
+        monsterId,
+        monster,
+        spawn,
+        definition,
+        deltaTime,
+      );
+      return;
+    }
+
+    this.moveMonsterAlongVector(
+      monster,
+      definition,
+      vectorX,
+      vectorY,
+      movementDistance,
+      "run",
+    );
+  }
+
+  private updateMonsterPatrolMovement(
+    monsterId: string,
+    monster: MonsterState,
+    spawn: MonsterSpawn,
+    definition: MonsterDefinition,
+    deltaTime: number,
+  ) {
+    let patrolState = this.monsterPatrolStates.get(monsterId);
+
+    if (!patrolState || patrolState.remainingMs <= 0) {
+      patrolState = this.createMonsterPatrolState(monster);
+      this.monsterPatrolStates.set(monsterId, patrolState);
+    }
+
+    patrolState.remainingMs -= deltaTime;
+
+    if (!patrolState.direction) {
+      monster.animation = "idle";
+      return;
+    }
+
+    let moveX = 0;
+    let moveY = 0;
+
+    switch (patrolState.direction) {
+      case "left":
+        moveX = -1;
+        break;
+
+      case "right":
+        moveX = 1;
+        break;
+
+      case "up":
+        moveY = -1;
+        break;
+
+      case "down":
+        moveY = 1;
+        break;
+    }
+
+    const distance = definition.movementSpeed * (deltaTime / 1000);
+    const deltaX = moveX * distance;
+    const deltaY = moveY * distance;
+    const requestedX = monster.x + deltaX;
+    const requestedY = monster.y + deltaY;
+
+    if (
+      Math.hypot(requestedX - spawn.x, requestedY - spawn.y) >
+      definition.patrolRadius
+    ) {
+      patrolState.remainingMs = 0;
+      monster.animation = "idle";
+      return;
+    }
+
+    const movement = resolveMonsterMovement(
+      monster.mapId,
+      definition.bodyProfileId,
+      monster.x,
+      monster.y,
+      deltaX,
+      deltaY,
+    );
+
+    const moved = movement.x !== monster.x || movement.y !== monster.y;
+
+    monster.x = movement.x;
+    monster.y = movement.y;
+    monster.animation = moved ? "walk" : "idle";
+
+    if (movement.blockedX || movement.blockedY || !moved) {
+      patrolState.remainingMs = 0;
+    }
+  }
+
+  private updateMonsterBehavior(deltaTime: number) {
+    this.state.monsters.forEach((monster, monsterId) => {
+      if (!monster.isAlive || monster.currentHealth <= 0) {
+        this.monsterPatrolStates.delete(monsterId);
+        this.monsterReactionStates.delete(monsterId);
+        this.monsterAttackStates.delete(monsterId);
+        this.monsterAttackCooldownRemaining.delete(monsterId);
+        this.monstersPendingRespawnIdleTick.delete(monsterId);
+        return;
+      }
+
+      if (this.monstersPendingRespawnIdleTick.delete(monsterId)) {
+        this.monsterAttackStates.delete(monsterId);
+        this.monsterAttackCooldownRemaining.delete(monsterId);
+        monster.animation = "idle";
+        return;
+      }
+
+      if (this.monsterHurtRemaining.has(monsterId)) {
+        this.monsterPatrolStates.delete(monsterId);
+        this.monsterAttackStates.delete(monsterId);
+        monster.animation = "hurt";
+        return;
+      }
+
+      const spawn = MONSTER_SPAWNS_BY_ID.get(monsterId);
+      const definition = getMonsterDefinition(monster.monsterType);
+
+      if (!spawn || !definition) {
+        this.monsterPatrolStates.delete(monsterId);
+        this.monsterReactionStates.delete(monsterId);
+        this.monsterAttackStates.delete(monsterId);
+        this.monsterAttackCooldownRemaining.delete(monsterId);
+        monster.animation = "idle";
+        return;
+      }
+
+      const attackState = this.monsterAttackStates.get(monsterId);
+
+      if (attackState && definition.attack) {
+        this.updateMonsterAttack(
+          monsterId,
+          monster,
+          attackState,
+          definition.attack,
+          deltaTime,
+        );
+        return;
+      }
+
+      if (attackState) {
+        this.monsterAttackStates.delete(monsterId);
+      }
+
+      if (
+        definition.reactionMode === "flee" &&
+        this.hasPendingValidAttackOnMonster(monsterId, monster, definition)
+      ) {
+        this.monsterPatrolStates.delete(monsterId);
+        monster.animation = "idle";
+        return;
+      }
+
+      let reactionState = this.monsterReactionStates.get(monsterId);
+
+      if (!reactionState) {
+        const target = this.findClosestMonsterTarget(
+          monster,
+          definition.detectionRadius,
+        );
+
+        if (target) {
+          reactionState = {
+            mode: "react",
+            targetSessionId: target.sessionId,
+          };
+
+          this.monsterReactionStates.set(monsterId, reactionState);
+          this.monsterPatrolStates.delete(monsterId);
+        }
+      }
+
+      if (reactionState?.mode === "react") {
+        this.updateMonsterReaction(
+          monsterId,
+          monster,
+          spawn,
+          definition,
+          reactionState,
+          deltaTime,
+        );
+        return;
+      }
+
+      if (reactionState?.mode === "return") {
+        this.updateMonsterReturn(
+          monsterId,
+          monster,
+          spawn,
+          definition,
+          deltaTime,
+        );
+        return;
+      }
+
+      this.updateMonsterPatrolMovement(
+        monsterId,
+        monster,
+        spawn,
+        definition,
+        deltaTime,
+      );
     });
   }
 
@@ -947,11 +1887,21 @@ export class MyRoom extends Room<{
 
     monster.currentHealth = Math.max(0, previousHealth - damage);
 
+    this.monsterAttackStates.delete(monsterId);
+
     if (monster.currentHealth === 0) {
       monster.isAlive = false;
       monster.animation = "death";
 
       this.monsterHurtRemaining.delete(monsterId);
+
+      this.monsterPatrolStates.delete(monsterId);
+
+      this.monsterReactionStates.delete(monsterId);
+
+      this.monsterAttackCooldownRemaining.delete(monsterId);
+
+      this.monstersPendingRespawnIdleTick.delete(monsterId);
 
       const spawn = MONSTER_SPAWNS_BY_ID.get(monsterId);
 
@@ -962,6 +1912,8 @@ export class MyRoom extends Room<{
       this.monsterDeathRemaining.set(monsterId, deathDurationMs);
     } else {
       monster.animation = "hurt";
+
+      this.monsterPatrolStates.delete(monsterId);
 
       this.monsterHurtRemaining.set(
         monsterId,
@@ -998,6 +1950,8 @@ export class MyRoom extends Room<{
       ),
     };
 
+    identity.mapId = normalizeWorldMapId(identity.mapId);
+
     const appearanceOptions = readObject(
       joinOptions.appearance ?? joinOptions.Appearance,
     );
@@ -1008,9 +1962,15 @@ export class MyRoom extends Room<{
 
     const player = new PlayerState();
 
-    player.x = readFiniteNumberFromAliases([joinOptions.x, joinOptions.X], 0);
+    const spawn = resolvePlayerSpawn(
+      identity.mapId,
+      readFiniteNumberFromAliases([joinOptions.x, joinOptions.X], Number.NaN),
+      readFiniteNumberFromAliases([joinOptions.y, joinOptions.Y], Number.NaN),
+    );
 
-    player.y = readFiniteNumberFromAliases([joinOptions.y, joinOptions.Y], 0);
+    player.x = spawn.x;
+
+    player.y = spawn.y;
 
     player.direction = readDirectionFromAliases([
       joinOptions.direction,
@@ -1027,6 +1987,12 @@ export class MyRoom extends Room<{
     player.characterId = identity.characterId;
 
     player.mapId = identity.mapId;
+
+    player.currentHealth = PLAYER_MAX_HEALTH;
+
+    player.maxHealth = PLAYER_MAX_HEALTH;
+
+    player.isAlive = true;
 
     player.appearance.Sex = readAppearanceValue(
       appearanceOptions.Sex ?? appearanceOptions.sex,
@@ -1164,13 +2130,23 @@ export class MyRoom extends Room<{
   onLeave(client: Client, code: CloseCode) {
     this.playerInputs.delete(client.sessionId);
 
+    this.playerCollisionBlocks.delete(client.sessionId);
+
     this.playerIdentities.delete(client.sessionId);
 
     this.playerAttackRemaining.delete(client.sessionId);
 
     this.playerAttackTargets.delete(client.sessionId);
 
+    this.playerRespawnRemaining.delete(client.sessionId);
+
     this.state.players.delete(client.sessionId);
+
+    this.monsterAttackStates.forEach((attackState, monsterId) => {
+      if (attackState.targetSessionId === client.sessionId) {
+        this.monsterAttackStates.delete(monsterId);
+      }
+    });
 
     console.log(
       `[Grandoria] Player ${client.sessionId} left.`,
@@ -1181,12 +2157,20 @@ export class MyRoom extends Room<{
 
   onDispose() {
     this.playerInputs.clear();
+
+    this.playerCollisionBlocks.clear();
     this.playerIdentities.clear();
     this.playerAttackRemaining.clear();
     this.playerAttackTargets.clear();
+    this.playerRespawnRemaining.clear();
     this.monsterHurtRemaining.clear();
     this.monsterDeathRemaining.clear();
     this.monsterRespawnRemaining.clear();
+    this.monsterPatrolStates.clear();
+    this.monsterReactionStates.clear();
+    this.monsterAttackStates.clear();
+    this.monsterAttackCooldownRemaining.clear();
+    this.monstersPendingRespawnIdleTick.clear();
 
     console.log(`[Grandoria] Room ${this.roomId} disposed.`);
   }

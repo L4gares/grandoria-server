@@ -13,6 +13,10 @@ const ATTACK_HIT_TICKS = 15;
 const ATTACK_FINISH_TICKS_AFTER_HIT = 5;
 const DEATH_DURATION_MS = 480;
 const RESPAWN_DELAY_MS = 10_000;
+const PLAYER_MAX_HEALTH = 50;
+const BOAR_ATTACK_DAMAGE = 7;
+const BOAR_ATTACK_HIT_TICKS = 15;
+const PLAYER_RESPAWN_TICKS = 180;
 
 type MonsterFixture = {
   id: string;
@@ -183,6 +187,9 @@ describe("MyRoom authoritative monster combat", () => {
     assert.strictEqual(serverPlayer.x, DEFAULT_JOIN_OPTIONS.x);
     assert.strictEqual(serverPlayer.y, DEFAULT_JOIN_OPTIONS.y);
     assert.strictEqual(serverPlayer.direction, DEFAULT_JOIN_OPTIONS.direction);
+    assert.strictEqual(serverPlayer.currentHealth, PLAYER_MAX_HEALTH);
+    assert.strictEqual(serverPlayer.maxHealth, PLAYER_MAX_HEALTH);
+    assert.strictEqual(serverPlayer.isAlive, true);
 
     assert.ok(serverHare);
     assert.strictEqual(serverHare.monsterType, HARE_MONSTER.type);
@@ -270,8 +277,90 @@ describe("MyRoom authoritative monster combat", () => {
     );
   });
 
+  it("starts the boar attack and damages the player on the hit frame", async () => {
+    const { client, room } = await createJoinedRoom(
+      getAttackJoinOptions(BOAR_MONSTER),
+    );
+
+    const player = room.state.players.get(client.sessionId);
+    const boar = room.state.monsters.get(BOAR_MONSTER.id);
+
+    assert.ok(player);
+    assert.ok(boar);
+
+    advanceFixedTicks(room, 1);
+
+    assert.strictEqual(boar.animation, "attack");
+    assert.strictEqual(boar.direction, "up");
+    assert.strictEqual(player.currentHealth, PLAYER_MAX_HEALTH);
+
+    advanceFixedTicks(room, BOAR_ATTACK_HIT_TICKS - 1);
+
+    assert.strictEqual(player.currentHealth, PLAYER_MAX_HEALTH);
+
+    advanceFixedTicks(room, 1);
+
+    assert.strictEqual(
+      player.currentHealth,
+      PLAYER_MAX_HEALTH - BOAR_ATTACK_DAMAGE,
+    );
+    assert.strictEqual(player.isAlive, true);
+  });
+
+  it("does not damage a player who leaves range before the hit frame", async () => {
+    const { client, room } = await createJoinedRoom(
+      getAttackJoinOptions(BOAR_MONSTER),
+    );
+
+    const player = room.state.players.get(client.sessionId);
+
+    assert.ok(player);
+
+    advanceFixedTicks(room, 1);
+
+    player.x = 500;
+    player.y = 500;
+
+    advanceFixedTicks(room, BOAR_ATTACK_HIT_TICKS);
+
+    assert.strictEqual(player.currentHealth, PLAYER_MAX_HEALTH);
+    assert.strictEqual(player.isAlive, true);
+  });
+
+  it("respawns a player after lethal boar damage", async () => {
+    const { client, room } = await createJoinedRoom(
+      getAttackJoinOptions(BOAR_MONSTER),
+    );
+
+    const player = room.state.players.get(client.sessionId);
+
+    assert.ok(player);
+
+    player.currentHealth = BOAR_ATTACK_DAMAGE;
+
+    advanceFixedTicks(room, 1 + BOAR_ATTACK_HIT_TICKS);
+
+    assert.strictEqual(player.currentHealth, 0);
+    assert.strictEqual(player.isAlive, false);
+    assert.strictEqual(player.animation, "death");
+
+    advanceFixedTicks(room, PLAYER_RESPAWN_TICKS);
+
+    assert.strictEqual(player.currentHealth, PLAYER_MAX_HEALTH);
+    assert.strictEqual(player.maxHealth, PLAYER_MAX_HEALTH);
+    assert.strictEqual(player.isAlive, true);
+    assert.strictEqual(player.animation, "idle");
+    assert.strictEqual(player.mapId, MAP_ID);
+  });
+
   it("rejects an attack from a different map", async () => {
-    const { client, room } = await createJoinedRoom({ mapId: "MAP_2" });
+    const { client, room } = await createJoinedRoom();
+
+    const player = room.state.players.get(client.sessionId);
+
+    assert.ok(player);
+
+    player.mapId = "MAP_2";
 
     await performValidHit(room, client);
 
