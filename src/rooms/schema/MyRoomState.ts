@@ -119,10 +119,57 @@ export class MonsterState extends Schema {
   isAlive: boolean = true;
 }
 
+export class WorldItemState extends Schema {
+  @type("string")
+  itemID: string = "";
+
+  @type("string")
+  type: string = "0";
+
+  @type("string")
+  subType: string = "0";
+
+  @type("number")
+  quantity: number = 1;
+
+  @type("number")
+  x: number = 0;
+
+  @type("number")
+  y: number = 0;
+
+  @type("number")
+  zOrder: number = 300;
+
+  @type("string")
+  mapId: string = "MAP_1";
+
+  @type("string")
+  source: string = "";
+
+  @type("string")
+  createdBy: string = "";
+
+  @type("number")
+  createdAt: number = 0;
+
+  @type("string")
+  monsterType: string = "";
+
+  @type("string")
+  monsterId: string = "";
+
+  @type("string")
+  rarity: string = "";
+}
+
 export class MyRoomState extends Schema {
   @type({ map: PlayerState })
   players = new MapSchema<PlayerState>();
 
   @type({ map: MonsterState })
   monsters = new MapSchema<MonsterState>();
+
+  @type({ map: WorldItemState })
+  items = new MapSchema<WorldItemState>();
 }

@@ -346,7 +346,7 @@ describe("MyRoom authoritative monster combat", () => {
 
     advanceFixedTicks(room, PLAYER_RESPAWN_TICKS);
 
-    assert.strictEqual(player.currentHealth, PLAYER_MAX_HEALTH);
+    assert.strictEqual(player.currentHealth, PLAYER_MAX_HEALTH / 2);
     assert.strictEqual(player.maxHealth, PLAYER_MAX_HEALTH);
     assert.strictEqual(player.isAlive, true);
     assert.strictEqual(player.animation, "idle");

@@ -5,7 +5,13 @@ import {
   MonsterState,
   PlayerState,
   PlayerEquipmentSlotState,
+  WorldItemState,
 } from "./schema/MyRoomState.js";
+
+import {
+  getItemDefinition,
+  getMonsterDropDefinition,
+} from "../items/ItemCatalog.js";
 
 import {
   normalizeWorldMapId,
@@ -26,6 +32,23 @@ type AttackMessage = {
   MonsterID?: unknown;
   targetId?: unknown;
   TargetID?: unknown;
+};
+
+type DropItemMessage = {
+  itemID?: unknown;
+  itemId?: unknown;
+  quantity?: unknown;
+  requestId?: unknown;
+  RequestID?: unknown;
+};
+
+type CollectItemMessage = {
+  requestId?: unknown;
+  RequestID?: unknown;
+  sharedItemID?: unknown;
+  sharedItemId?: unknown;
+  itemID?: unknown;
+  itemId?: unknown;
 };
 
 type PlayerInput = {
@@ -203,6 +226,23 @@ type MonsterAttackState = {
   remainingMs: number;
 };
 
+type CreateWorldItemOptions = {
+  createdBy: string;
+  itemID: string;
+  mapId: string;
+  monsterId?: string;
+  monsterType?: string;
+  rarity?: string;
+  source: "inventory_drop" | "mob_drop";
+  x: number;
+  y: number;
+};
+
+type SelectedMonsterDrop = {
+  itemID: string;
+  rarity: string;
+};
+
 function getMonsterDefinition(
   monsterType: string,
 ): MonsterDefinition | undefined {
@@ -231,6 +271,11 @@ const PLAYER_RESPAWN_POINTS = [
   { mapId: "MAP_1", x: 796, y: 1394 },
   { mapId: "MAP_1", x: 889, y: 1402 },
 ] as const;
+const ITEM_COLLECTION_DISTANCE = 48;
+const ITEM_DROP_OFFSET_X = 25;
+const ITEM_DROP_OFFSET_Y = 16;
+const ITEM_DROP_POSITION_ATTEMPTS = 8;
+const MAX_ITEM_REQUEST_ID_LENGTH = 128;
 const FIXED_TIME_STEP = 1000 / 60;
 const MONSTER_PATROL_MIN_DURATION_MS = 2_000;
 const MONSTER_PATROL_MAX_DURATION_MS = 10_000;
@@ -387,6 +432,16 @@ function readFiniteNumberFromAliases(
   }
 
   return fallback;
+}
+
+function readPositiveInteger(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+
+  const result = Math.trunc(value);
+
+  return result > 0 ? result : null;
 }
 
 function readDirectionFromAliases(values: unknown[]): string {
@@ -642,7 +697,16 @@ export class MyRoom extends Room<{
 
   private readonly monstersPendingRespawnIdleTick = new Set<string>();
 
+  private readonly completedDropRequests = new Map<
+    string,
+    Map<string, Record<string, unknown>>
+  >();
+
   private monsterRandom: () => number = Math.random;
+
+  private worldItemRandom: () => number = Math.random;
+
+  private worldItemSequence = 0;
 
   messages = {
     input: (client: Client, message: InputMessage) => {
@@ -752,6 +816,14 @@ export class MyRoom extends Room<{
         sub_type: targetSlot.sub_type,
       });
     },
+
+    drop_item: (client: Client, message?: DropItemMessage) => {
+      this.handleDropItemRequest(client, message);
+    },
+
+    collect_item: (client: Client, message?: CollectItemMessage) => {
+      this.handleCollectItemRequest(client, message);
+    },
   };
 
   onCreate() {
@@ -769,6 +841,421 @@ export class MyRoom extends Room<{
 
         this.fixedTick(FIXED_TIME_STEP);
       }
+    });
+  }
+
+  private createWorldItem(options: CreateWorldItemOptions): string | null {
+    const definition = getItemDefinition(options.itemID);
+
+    if (!definition) {
+      return null;
+    }
+
+    this.worldItemSequence += 1;
+
+    const sourcePrefix = options.source === "mob_drop" ? "mob_drop" : "drop";
+    const safeOrigin = (options.monsterId || "item").replace(
+      /[^A-Za-z0-9_-]/g,
+      "_",
+    );
+    const sharedItemID = [
+      sourcePrefix,
+      safeOrigin,
+      Date.now().toString(36),
+      this.worldItemSequence.toString(36),
+    ].join("_");
+
+    const item = new WorldItemState();
+
+    item.itemID = options.itemID;
+    item.type = definition.type;
+    item.subType = definition.subType;
+    item.quantity = 1;
+    item.x = Math.round(options.x);
+    item.y = Math.round(options.y);
+    item.zOrder = 300;
+    item.mapId = normalizeWorldMapId(options.mapId);
+    item.source = options.source;
+    item.createdBy = options.createdBy;
+    item.createdAt = Date.now();
+    item.monsterType = options.monsterType ?? "";
+    item.monsterId = options.monsterId ?? "";
+    item.rarity = options.rarity ?? "";
+
+    this.state.items.set(sharedItemID, item);
+
+    return sharedItemID;
+  }
+
+  private findInventoryDropPosition(player: PlayerState): {
+    x: number;
+    y: number;
+  } {
+    for (
+      let attempt = 0;
+      attempt < ITEM_DROP_POSITION_ATTEMPTS;
+      attempt += 1
+    ) {
+      const offsetX =
+        Math.floor(
+          clampUnitInterval(this.worldItemRandom()) *
+            (ITEM_DROP_OFFSET_X * 2 + 1),
+        ) - ITEM_DROP_OFFSET_X;
+      const offsetY =
+        Math.floor(
+          clampUnitInterval(this.worldItemRandom()) *
+            (ITEM_DROP_OFFSET_Y * 2 + 1),
+        ) - ITEM_DROP_OFFSET_Y;
+      const candidateX = Math.round(player.x + offsetX);
+      const candidateY = Math.round(player.y + offsetY);
+      const resolved = resolvePlayerSpawn(
+        player.mapId,
+        candidateX,
+        candidateY,
+      );
+
+      if (!resolved.recovered) {
+        return {
+          x: candidateX,
+          y: candidateY,
+        };
+      }
+    }
+
+    return {
+      x: Math.round(player.x),
+      y: Math.round(player.y),
+    };
+  }
+
+  private handleDropItemRequest(
+    client: Client,
+    message?: DropItemMessage,
+  ) {
+    const messageData = readObject(message);
+    const requestId = readSafeStringFromAliases(
+      [messageData.requestId, messageData.RequestID],
+      MAX_ITEM_REQUEST_ID_LENGTH,
+    );
+    const itemID = readSafeStringFromAliases(
+      [messageData.itemID, messageData.itemId],
+      128,
+    );
+    const quantity = readPositiveInteger(messageData.quantity);
+    const player = this.state.players.get(client.sessionId);
+    const definition = getItemDefinition(itemID);
+
+    if (!requestId) {
+      client.send("drop_item_result", {
+        code: "INVALID_REQUEST_ID",
+        ok: false,
+        requestId: "",
+      });
+      return;
+    }
+
+    const previousResult = this.completedDropRequests
+      .get(client.sessionId)
+      ?.get(requestId);
+
+    if (previousResult) {
+      client.send("drop_item_result", previousResult);
+      return;
+    }
+
+    if (!player || !player.isAlive || player.currentHealth <= 0) {
+      client.send("drop_item_result", {
+        code: "PLAYER_UNAVAILABLE",
+        ok: false,
+        requestId,
+      });
+      return;
+    }
+
+    if (!definition) {
+      client.send("drop_item_result", {
+        code: "UNKNOWN_ITEM",
+        ok: false,
+        requestId,
+      });
+      return;
+    }
+
+    if (!quantity || quantity > definition.maxStack) {
+      client.send("drop_item_result", {
+        code: "INVALID_QUANTITY",
+        maxStack: definition.maxStack,
+        ok: false,
+        requestId,
+      });
+      return;
+    }
+
+    const identity = this.playerIdentities.get(client.sessionId);
+    const createdBy = identity?.playerUid || client.sessionId;
+    const sharedItemIDs: string[] = [];
+
+    for (let itemIndex = 0; itemIndex < quantity; itemIndex += 1) {
+      const position = this.findInventoryDropPosition(player);
+      const sharedItemID = this.createWorldItem({
+        createdBy,
+        itemID,
+        mapId: player.mapId,
+        source: "inventory_drop",
+        x: position.x,
+        y: position.y,
+      });
+
+      if (sharedItemID) {
+        sharedItemIDs.push(sharedItemID);
+      }
+    }
+
+    if (sharedItemIDs.length !== quantity) {
+      for (const sharedItemID of sharedItemIDs) {
+        this.state.items.delete(sharedItemID);
+      }
+
+      client.send("drop_item_result", {
+        code: "DROP_CREATION_FAILED",
+        ok: false,
+        requestId,
+      });
+      return;
+    }
+
+    const result: Record<string, unknown> = {
+      code: "DROP_CREATED",
+      itemID,
+      ok: true,
+      quantity,
+      requestId,
+      sharedItemIDs,
+      subType: definition.subType,
+      type: definition.type,
+    };
+    let sessionRequests = this.completedDropRequests.get(client.sessionId);
+
+    if (!sessionRequests) {
+      sessionRequests = new Map();
+      this.completedDropRequests.set(client.sessionId, sessionRequests);
+    }
+
+    sessionRequests.set(requestId, result);
+
+    while (sessionRequests.size > 64) {
+      const oldestRequestId = sessionRequests.keys().next().value;
+
+      if (typeof oldestRequestId !== "string") {
+        break;
+      }
+
+      sessionRequests.delete(oldestRequestId);
+    }
+
+    client.send("drop_item_result", result);
+
+    console.log("[Grandoria] Inventory drop created:", {
+      itemID,
+      quantity,
+      requestId,
+      sessionId: client.sessionId,
+      sharedItemIDs,
+    });
+  }
+
+  private handleCollectItemRequest(
+    client: Client,
+    message?: CollectItemMessage,
+  ) {
+    const messageData = readObject(message);
+    const requestId = readSafeStringFromAliases(
+      [messageData.requestId, messageData.RequestID],
+      MAX_ITEM_REQUEST_ID_LENGTH,
+    );
+    const sharedItemID = readSafeStringFromAliases(
+      [
+        messageData.sharedItemID,
+        messageData.sharedItemId,
+        messageData.itemID,
+        messageData.itemId,
+      ],
+      192,
+    );
+    const player = this.state.players.get(client.sessionId);
+
+    if (!requestId || !sharedItemID) {
+      client.send("collect_item_result", {
+        code: "INVALID_REQUEST",
+        ok: false,
+        requestId,
+        sharedItemID,
+      });
+      return;
+    }
+
+    if (!player || !player.isAlive || player.currentHealth <= 0) {
+      client.send("collect_item_result", {
+        code: "PLAYER_UNAVAILABLE",
+        ok: false,
+        requestId,
+        sharedItemID,
+      });
+      return;
+    }
+
+    const item = this.state.items.get(sharedItemID);
+
+    if (!item) {
+      client.send("collect_item_result", {
+        code: "ITEM_NOT_FOUND",
+        ok: false,
+        requestId,
+        sharedItemID,
+      });
+      return;
+    }
+
+    if (item.mapId !== player.mapId) {
+      client.send("collect_item_result", {
+        code: "DIFFERENT_MAP",
+        ok: false,
+        requestId,
+        sharedItemID,
+      });
+      return;
+    }
+
+    const distance = Math.hypot(item.x - player.x, item.y - player.y);
+
+    if (distance > ITEM_COLLECTION_DISTANCE) {
+      client.send("collect_item_result", {
+        code: "OUT_OF_RANGE",
+        distance,
+        maxDistance: ITEM_COLLECTION_DISTANCE,
+        ok: false,
+        requestId,
+        sharedItemID,
+      });
+      return;
+    }
+
+    const result = {
+      code: "ITEM_COLLECTED",
+      itemID: item.itemID,
+      ok: true,
+      quantity: item.quantity,
+      requestId,
+      sharedItemID,
+      subType: item.subType,
+      type: item.type,
+    };
+
+    this.state.items.delete(sharedItemID);
+
+    client.send("collect_item_result", result);
+
+    console.log("[Grandoria] Shared item collected:", {
+      itemID: item.itemID,
+      requestId,
+      sessionId: client.sessionId,
+      sharedItemID,
+    });
+  }
+
+  private selectMonsterDrop(monsterType: string): SelectedMonsterDrop | null {
+    const definition = getMonsterDropDefinition(monsterType);
+
+    if (!definition) {
+      return null;
+    }
+
+    const dropRoll =
+      Math.min(99, Math.floor(clampUnitInterval(this.worldItemRandom()) * 100)) +
+      1;
+
+    if (dropRoll > definition.chancePercent) {
+      return null;
+    }
+
+    const validRarities = definition.rarities
+      .map((rarity) => ({
+        itemIDs: rarity.itemIDs.filter((itemID) => getItemDefinition(itemID)),
+        name: rarity.name,
+        weight: Math.max(0, rarity.weight),
+      }))
+      .filter((rarity) => rarity.weight > 0 && rarity.itemIDs.length > 0);
+    const totalWeight = validRarities.reduce(
+      (total, rarity) => total + rarity.weight,
+      0,
+    );
+
+    if (totalWeight <= 0) {
+      return null;
+    }
+
+    const rarityRoll =
+      clampUnitInterval(this.worldItemRandom()) * totalWeight;
+    let accumulatedWeight = 0;
+    let selectedRarity = validRarities[validRarities.length - 1];
+
+    for (const rarity of validRarities) {
+      accumulatedWeight += rarity.weight;
+
+      if (rarityRoll < accumulatedWeight) {
+        selectedRarity = rarity;
+        break;
+      }
+    }
+
+    const itemIndex = Math.min(
+      selectedRarity.itemIDs.length - 1,
+      Math.floor(
+        clampUnitInterval(this.worldItemRandom()) *
+          selectedRarity.itemIDs.length,
+      ),
+    );
+
+    return {
+      itemID: selectedRarity.itemIDs[itemIndex],
+      rarity: selectedRarity.name,
+    };
+  }
+
+  private spawnMonsterDrop(
+    monsterId: string,
+    monster: MonsterState,
+    killerSessionId: string,
+  ) {
+    const selectedDrop = this.selectMonsterDrop(monster.monsterType);
+
+    if (!selectedDrop) {
+      return;
+    }
+
+    const identity = this.playerIdentities.get(killerSessionId);
+    const sharedItemID = this.createWorldItem({
+      createdBy: identity?.playerUid || killerSessionId,
+      itemID: selectedDrop.itemID,
+      mapId: monster.mapId,
+      monsterId,
+      monsterType: monster.monsterType,
+      rarity: selectedDrop.rarity,
+      source: "mob_drop",
+      x: monster.x,
+      y: monster.y,
+    });
+
+    if (!sharedItemID) {
+      return;
+    }
+
+    console.log("[Grandoria] Monster drop created:", {
+      itemID: selectedDrop.itemID,
+      monsterId,
+      monsterType: monster.monsterType,
+      rarity: selectedDrop.rarity,
+      sharedItemID,
     });
   }
 
@@ -1893,6 +2380,8 @@ export class MyRoom extends Room<{
       monster.isAlive = false;
       monster.animation = "death";
 
+      this.spawnMonsterDrop(monsterId, monster, sessionId);
+
       this.monsterHurtRemaining.delete(monsterId);
 
       this.monsterPatrolStates.delete(monsterId);
@@ -2139,6 +2628,8 @@ export class MyRoom extends Room<{
     this.playerAttackTargets.delete(client.sessionId);
 
     this.playerRespawnRemaining.delete(client.sessionId);
+
+    this.completedDropRequests.delete(client.sessionId);
 
     this.state.players.delete(client.sessionId);
 
