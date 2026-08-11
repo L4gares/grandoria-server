@@ -22,15 +22,14 @@ import { fileURLToPath } from "node:url";
 import {
   assertArtifactCurrent,
   buildWorldArtifact,
+  createSvgPreview,
   serializeWorldArtifact,
 } from "../scripts/export-gdevelop-world.mjs";
+import { resolveCanonicalGDevelopProject } from "../scripts/resolve-gdevelop-project.mjs";
 
 const SERVER_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const GAME_ROOT = resolve(SERVER_ROOT, "..", "grandoria-game");
-const PROJECT_PATH = resolve(
-  GAME_ROOT,
-  "RPG-2D-project-organized-by-systems-pre-combat-english.json",
-);
+const PROJECT_PATH = resolveCanonicalGDevelopProject({ serverRoot: SERVER_ROOT });
+const GAME_ROOT = dirname(PROJECT_PATH);
 const EXPORTER_PATH = resolve(
   SERVER_ROOT,
   "scripts",
@@ -65,7 +64,18 @@ function isPathInside(parentPath: string, childPath: string) {
 }
 
 function hashFile(filePath: string) {
-  return createHash("sha256").update(readFileSync(filePath)).digest("hex");
+  const bytes = readFileSync(filePath);
+  const hashBytes = filePath.toLowerCase().endsWith(".json")
+    ? Buffer.from(
+        bytes
+          .toString("utf8")
+          .replaceAll("\r\n", "\n")
+          .replaceAll("\r", "\n"),
+        "utf8",
+      )
+    : bytes;
+
+  return createHash("sha256").update(hashBytes).digest("hex");
 }
 
 function findCollider(artifact: any, instancePersistentUuid: string) {
@@ -215,18 +225,18 @@ describe("MAP_1 deterministic GDevelop world exporter", () => {
   it("records canonical project and active resource hashes", () => {
     assert.strictEqual(
       artifact.source.project.sha256,
-      "bb5d7e5745f2c3f7464dbdcb8213db6c16c3eaa60b20c45d58d7a7e867001880",
+      "536a93225f9e752b6316cb01342b873acea7f32564b6713eff75eae592f8e463",
     );
     assert.strictEqual(artifact.source.project.sha256, hashFile(PROJECT_PATH));
 
     const expectedCoreHashes = new Map([
       [
         "MAPA_1/Map1_TiledFiles/MAP1.json",
-        "5f490ab8561b0084e665c4e364cbe44a7e9d0b54631d685c382c28d71a5bf1a1",
+        "89f3a30268a67f71e971a78bb0fb5193b224f3f6142bf79635a933ef3384b784",
       ],
       [
         "MAPA_1/Map1_TiledFiles/MAP1_Tileset.json",
-        "5d9d9d99578330867e029c7e41d29a154cd9f284d2af81c863ec71a28aaaa772",
+        "19b08c39c490b7ee8bed2c889e174ec102f4f03712dbebc94b47753e35790dc0",
       ],
       [
         "MAPA_1/Map1_TiledFiles/MAP_1_PNG.png",
@@ -819,6 +829,13 @@ describe("MAP_1 deterministic GDevelop world exporter", () => {
       ),
       false,
     );
+  });
+
+  it("renders the SVG preview without the removed distant floor duplicate", () => {
+    const svg = createSvgPreview(artifact);
+
+    assert.match(svg, /Grandoria MAP_1 physical-world candidate preview/);
+    assert.doesNotMatch(svg, /Excluded distant floor1_Map1 instance/);
   });
 
   it("stores exact unresolved candidate alternatives", () => {

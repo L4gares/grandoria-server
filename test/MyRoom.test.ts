@@ -225,6 +225,58 @@ describe("MyRoom authoritative monster combat", () => {
     assert.strictEqual(syncedBoar.isAlive, true);
   });
 
+  it("does not leak equipment when the same account changes characters", async () => {
+    const room = await colyseus.createRoom<MyRoom>(ROOM_NAME, {});
+
+    room.setSimulationInterval();
+    room.autoDispose = false;
+
+    const firstClient = await colyseus.connectTo(room, {
+      ...DEFAULT_JOIN_OPTIONS,
+      characterId: "first-character",
+      characterName: "First Character",
+      equipment: {
+        Weapons: {
+          id: "first-character-sword",
+          type: "weapon",
+          sub_type: "one_handed_sword",
+        },
+      },
+    });
+
+    await room.waitForNextPatch();
+
+    const firstPlayer = room.state.players.get(firstClient.sessionId);
+
+    assert.ok(firstPlayer);
+    assert.strictEqual(firstPlayer.characterId, "first-character");
+    assert.strictEqual(firstPlayer.equipment.Weapons.id, "first-character-sword");
+
+    await firstClient.leave();
+
+    assert.strictEqual(room.state.players.has(firstClient.sessionId), false);
+
+    const secondClient = await colyseus.connectTo(room, {
+      ...DEFAULT_JOIN_OPTIONS,
+      characterId: "second-character",
+      characterName: "Second Character",
+    });
+
+    await room.waitForNextPatch();
+
+    const secondPlayer = room.state.players.get(secondClient.sessionId);
+
+    assert.ok(secondPlayer);
+    assert.strictEqual(secondPlayer.characterId, "second-character");
+    assert.strictEqual(secondPlayer.displayName, "Second Character");
+    assert.strictEqual(secondPlayer.equipment.Head.id, "empty");
+    assert.strictEqual(secondPlayer.equipment.Tronco.id, "empty");
+    assert.strictEqual(secondPlayer.equipment.Legs.id, "empty");
+    assert.strictEqual(secondPlayer.equipment.Foots.id, "empty");
+    assert.strictEqual(secondPlayer.equipment.Weapons.id, "empty");
+    assert.strictEqual(secondPlayer.equipment.OffHand.id, "empty");
+  });
+
   it("damages only the hare for a valid hare attack", async () => {
     const { client, room } = await createJoinedRoom();
 

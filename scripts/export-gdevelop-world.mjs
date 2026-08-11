@@ -147,6 +147,13 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function normalizeJsonSourceBytes(bytes) {
+  return Buffer.from(
+    bytes.toString("utf8").replaceAll("\r\n", "\n").replaceAll("\r", "\n"),
+    "utf8",
+  );
+}
+
 function parseJson(bytes, label) {
   try {
     return JSON.parse(bytes.toString("utf8"));
@@ -458,6 +465,9 @@ function createResourceRegistry(project, projectRoot) {
 
     if (!manifestEntry) {
       const bytes = readFileSync(resolvedFile.absolutePath);
+      const manifestBytes = resolvedFile.file.toLowerCase().endsWith(".json")
+        ? normalizeJsonSourceBytes(bytes)
+        : bytes;
 
       bytesByFile.set(resolvedFile.file, bytes);
       manifestEntry = {
@@ -465,8 +475,8 @@ function createResourceRegistry(project, projectRoot) {
         kind,
         names: new Set(),
         purposes: new Set(),
-        sha256: sha256(bytes),
-        sizeBytes: bytes.length,
+        sha256: sha256(manifestBytes),
+        sizeBytes: manifestBytes.length,
       };
       manifestByFile.set(resolvedFile.file, manifestEntry);
     } else {
@@ -1732,22 +1742,38 @@ function extractTileMapContext(layout, objectRegistry, resourceRegistry) {
   );
   const duplicateFloors = floorInstances.filter((instance) => instance !== primaryFloor);
 
+  assertCondition(
+    primaryFloor,
+    "MAP_1 must contain one floor1_Map1 instance aligned with GroundMap1.",
+  );
+  assertCondition(
+    duplicateFloors.length <= 1,
+    "MAP_1 contains more than one distant floor1_Map1 duplicate.",
+  );
+
+  const distantFloor1Duplicate = duplicateFloors[0];
+
   const pisoInstances = instances.filter((instance) => instance.objectName === "pisoMap1");
   assertCondition(pisoInstances.length === 1, "MAP_1 must contain one pisoMap1 instance.");
 
   return {
     context: {
-      distantFloor1Duplicate: {
-        nonEmptyExtent: duplicateFloors[0].nonEmptyExtent,
-        persistentUuid: duplicateFloors[0].persistentUuid,
-        position: duplicateFloors[0].position,
-        reason: "excluded_distant_duplicate",
-      },
+      ...(distantFloor1Duplicate
+        ? {
+            distantFloor1Duplicate: {
+              nonEmptyExtent: distantFloor1Duplicate.nonEmptyExtent,
+              persistentUuid: distantFloor1Duplicate.persistentUuid,
+              position: distantFloor1Duplicate.position,
+              reason: "excluded_distant_duplicate",
+            },
+          }
+        : {}),
       fullVisualBackgroundFootprint: groundInstances[0].nonEmptyExtent,
       instances: instances.map(({ cells, ...instance }) => ({
         ...instance,
         candidateRole:
-          instance.persistentUuid === duplicateFloors[0].persistentUuid
+          distantFloor1Duplicate &&
+          instance.persistentUuid === distantFloor1Duplicate.persistentUuid
             ? "excluded_distant_duplicate"
             : ["GroundMap1", "GroundDetailsMap1"].includes(instance.objectName)
               ? "excluded_background"
@@ -1995,41 +2021,46 @@ function createCandidatePlayableRegion(colliders, anchorBodies, tileContext) {
     tradeoff:
       "Preserves the complete southern piso component without using the full piso AABB, but piso is not authoritative walkability metadata.",
   };
+  const distantFloor1Duplicate = tileContext.context.distantFloor1Duplicate;
+  const rejectedRegions = [
+    ...(distantFloor1Duplicate
+      ? [
+          {
+            id: "distant-floor1-duplicate",
+            polygonSet: [
+              {
+                holes: [],
+                outer: rectanglePolygon(distantFloor1Duplicate.nonEmptyExtent),
+              },
+            ],
+            reason: "Explicitly excluded distant duplicate floor instance.",
+            sourcePersistentUuid: distantFloor1Duplicate.persistentUuid,
+          },
+        ]
+      : []),
+    {
+      id: "full-visual-background-footprint",
+      polygonSet: [
+        {
+          holes: [],
+          outer: rectanglePolygon(
+            tileContext.context.fullVisualBackgroundFootprint,
+          ),
+        },
+      ],
+      reason:
+        "Ground and GroundDetails are visual background and do not define physical walkability.",
+    },
+  ];
 
   return {
     candidates: [activeEnvelopeCandidate, pisoUnionCandidate].sort((left, right) =>
       compareStrings(left.id, right.id),
     ),
     decision: "unresolved",
-    rejectedRegions: [
-      {
-        id: "distant-floor1-duplicate",
-        polygonSet: [
-          {
-            holes: [],
-            outer: rectanglePolygon(
-              tileContext.context.distantFloor1Duplicate.nonEmptyExtent,
-            ),
-          },
-        ],
-        reason: "Explicitly excluded distant duplicate floor instance.",
-        sourcePersistentUuid:
-          tileContext.context.distantFloor1Duplicate.persistentUuid,
-      },
-      {
-        id: "full-visual-background-footprint",
-        polygonSet: [
-          {
-            holes: [],
-            outer: rectanglePolygon(
-              tileContext.context.fullVisualBackgroundFootprint,
-            ),
-          },
-        ],
-        reason:
-          "Ground and GroundDetails are visual background and do not define physical walkability.",
-      },
-    ].sort((left, right) => compareStrings(left.id, right.id)),
+    rejectedRegions: rejectedRegions.sort((left, right) =>
+      compareStrings(left.id, right.id),
+    ),
     selectedCandidateId: null,
     status: "pending_manual_approval",
   };
@@ -2173,6 +2204,7 @@ export function buildWorldArtifact({ projectPath }) {
 
   const projectRoot = dirname(absoluteProjectPath);
   const projectBytes = readFileSync(absoluteProjectPath);
+  const normalizedProjectBytes = normalizeJsonSourceBytes(projectBytes);
   const project = parseJson(projectBytes, EXPECTED_PROJECT_FILE);
 
   assertCondition(
@@ -2286,10 +2318,15 @@ export function buildWorldArtifact({ projectPath }) {
           message:
             "Selected zero-area masks were preserved as diagnostics without visual rectangle fallback.",
         },
-        {
-          code: "distant_floor_duplicate_excluded",
-          message: "The distant floor1_Map1 duplicate is excluded from every candidate.",
-        },
+        ...(tileContext.context.distantFloor1Duplicate
+          ? [
+              {
+                code: "distant_floor_duplicate_excluded",
+                message:
+                  "The distant floor1_Map1 duplicate is excluded from every candidate.",
+              },
+            ]
+          : []),
         {
           code: "full_background_excluded",
           message:
@@ -2307,8 +2344,8 @@ export function buildWorldArtifact({ projectPath }) {
     source: {
       project: {
         file: EXPECTED_PROJECT_FILE,
-        sha256: sha256(projectBytes),
-        sizeBytes: projectBytes.length,
+        sha256: sha256(normalizedProjectBytes),
+        sizeBytes: normalizedProjectBytes.length,
       },
       resources: resourceRegistry.toManifest(),
     },
@@ -2344,7 +2381,9 @@ export function createSvgPreview(artifact) {
     ...mainCandidates.flatMap((candidate) =>
       candidate.polygonSet.flatMap((polygon) => polygon.outer),
     ),
-    ...duplicate.polygonSet.flatMap((polygon) => polygon.outer),
+    ...(duplicate
+      ? duplicate.polygonSet.flatMap((polygon) => polygon.outer)
+      : []),
   ];
   const visibleAabb = calculateAabb([visiblePoints]);
   const margin = 128;
@@ -2445,12 +2484,14 @@ export function createSvgPreview(artifact) {
       `<text x="${anchor.x + 14}" y="${anchor.y - 12}" class="anchor-label">${escapeXml(anchor.id)} (${anchor.x}, ${anchor.y})</text>`,
     ];
   });
-  const duplicateShape = duplicate.polygonSet.map((polygon) =>
-    svgPolygon(
-      polygon.outer,
-      'fill="#ef4444" fill-opacity="0.04" stroke="#ef4444" stroke-width="5" stroke-dasharray="20 12" class="world-shape"',
-    ),
-  );
+  const duplicateShape = duplicate
+    ? duplicate.polygonSet.map((polygon) =>
+        svgPolygon(
+          polygon.outer,
+          'fill="#ef4444" fill-opacity="0.04" stroke="#ef4444" stroke-width="5" stroke-dasharray="20 12" class="world-shape"',
+        ),
+      )
+    : [];
   const legendX = viewBox.minX + 36;
   const legendY = viewBox.maxY - 330;
   const legendEntries = [
@@ -2463,7 +2504,9 @@ export function createSvgPreview(artifact) {
     ["#22c55e", "Player recovery entry"],
     ["#eab308", "Hare spawn"],
     ["#dc2626", "Boar spawn"],
-    ["#ef4444", "Excluded distant floor1_Map1 instance"],
+    ...(duplicate
+      ? [["#ef4444", "Excluded distant floor1_Map1 instance"]]
+      : []),
   ];
   const legend = legendEntries
     .map(

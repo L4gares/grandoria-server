@@ -4,15 +4,11 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { ITEM_DEFINITIONS } from "../src/items/ItemCatalog.js";
+import { resolveCanonicalGDevelopProject } from "../scripts/resolve-gdevelop-project.mjs";
 
 const TEST_DIRECTORY = dirname(fileURLToPath(import.meta.url));
-const PROJECT_PATH = resolve(
-  TEST_DIRECTORY,
-  "..",
-  "..",
-  "grandoria-game",
-  "RPG-2D-project-organized-by-systems-pre-combat-english.json",
-);
+const SERVER_ROOT = resolve(TEST_DIRECTORY, "..");
+const PROJECT_PATH = resolveCanonicalGDevelopProject({ serverRoot: SERVER_ROOT });
 
 type JsonObject = Record<string, any>;
 
@@ -82,17 +78,10 @@ describe("GDevelop Colyseus shared item migration", () => {
     "05 — COLYSEUS — SHARED ITEMS AND DROPS",
   );
 
-  it("moves the active shared item flow out of the Firebase event sheet", () => {
-    assert.ok(firebaseSheet);
+  it("keeps shared items on Colyseus after removing the RTDB event sheet", () => {
+    assert.strictEqual(firebaseSheet, undefined);
     assert.ok(colyseusSheet);
     assert.ok(sharedItemsGroup);
-    assert.strictEqual(
-      findGroup(
-        firebaseSheet,
-        "02 — FIREBASE RTDB — SHARED ITEMS AND DROPS",
-      ),
-      undefined,
-    );
   });
 
   it("contains no Firebase API use in the migrated shared item blocks", () => {
