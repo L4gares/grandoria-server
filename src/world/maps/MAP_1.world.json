@@ -1,101 +1,6 @@
 {
   "anchors": {
-    "monsterSpawns": [
-      {
-        "bodyProfileId": "mob_boar",
-        "collisionChannel": "monster",
-        "direction": "down",
-        "id": "map1_boar_001",
-        "kind": "monster_spawn",
-        "mapId": "MAP_1",
-        "validation": {
-          "finiteCoordinates": true,
-          "insideCandidateIds": [
-            "active-evidence-envelope",
-            "active-evidence-plus-complete-piso-component"
-          ],
-          "overlapsBlockingCollider": false,
-          "validForEveryCandidate": true
-        },
-        "worldBody": {
-          "aabb": {
-            "maxX": 149.5,
-            "maxY": 1052.5,
-            "minX": 137.5,
-            "minY": 1041
-          },
-          "polygons": [
-            [
-              {
-                "x": 137.5,
-                "y": 1041
-              },
-              {
-                "x": 149.5,
-                "y": 1041
-              },
-              {
-                "x": 149.5,
-                "y": 1052.5
-              },
-              {
-                "x": 137.5,
-                "y": 1052.5
-              }
-            ]
-          ]
-        },
-        "x": 144,
-        "y": 1056
-      },
-      {
-        "bodyProfileId": "mob_hare",
-        "collisionChannel": "monster",
-        "direction": "down",
-        "id": "map1_hare_001",
-        "kind": "monster_spawn",
-        "mapId": "MAP_1",
-        "validation": {
-          "finiteCoordinates": true,
-          "insideCandidateIds": [
-            "active-evidence-envelope",
-            "active-evidence-plus-complete-piso-component"
-          ],
-          "overlapsBlockingCollider": false,
-          "validForEveryCandidate": true
-        },
-        "worldBody": {
-          "aabb": {
-            "maxX": 175,
-            "maxY": 970.5,
-            "minX": 161.5,
-            "minY": 958.5
-          },
-          "polygons": [
-            [
-              {
-                "x": 161.5,
-                "y": 958.5
-              },
-              {
-                "x": 175,
-                "y": 958.5
-              },
-              {
-                "x": 175,
-                "y": 970.5
-              },
-              {
-                "x": 161.5,
-                "y": 970.5
-              }
-            ]
-          ]
-        },
-        "x": 168,
-        "y": 968
-      }
-    ],
+    "monsterSpawns": [],
     "recoveryEntries": [
       {
         "bodyProfileId": "character",
@@ -13476,9 +13381,9 @@
   "mapId": "MAP_1",
   "source": {
     "project": {
-      "file": "RPG-2D-project-organized-by-systems-pre-combat-english.json",
-      "sha256": "536a93225f9e752b6316cb01342b873acea7f32564b6713eff75eae592f8e463",
-      "sizeBytes": 6129176
+      "file": "RPG-2D-project-Grandoria-Colyseus-authoritative-inventory-equipment.json",
+      "sha256": "41e78a1be54e76192615316235199ec8b997eeb1bf9a3b0839dd3ec0cccbbb9f",
+      "sizeBytes": 6135194
     },
     "resources": [
       {
@@ -13600,7 +13505,77 @@
         ],
         "sha256": "31255aed8fc1d6d28169bbd957f86013d27b5541109b1a7b4b42ea2378859511",
         "sizeBytes": 1543
+      },
+      {
+        "file": "assets/spawn_points_spawn_point_mobs_regionSpawn.png",
+        "kind": "image",
+        "names": [
+          "spawn_points\\spawn_point_mobs\\regionSpawn"
+        ],
+        "purposes": [
+          "spawn_region_geometry"
+        ],
+        "sha256": "55a0e81d2483bb626da878d5c47a3e593a48eb5affb4a0dfcc70ba1750b48542",
+        "sizeBytes": 188
       }
     ]
-  }
+  },
+  "spawnRegions": [
+    {
+      "bounds": {
+        "maxX": 330.5,
+        "maxY": 1291.5,
+        "minX": 111.5,
+        "minY": 1110.5
+      },
+      "enabled": true,
+      "id": "grassland_boar_01",
+      "mapId": "MAP_1",
+      "maxAlive": 5,
+      "mobType": "mob_boar",
+      "position": {
+        "x": 221,
+        "y": 1201
+      },
+      "respawnSeconds": 10,
+      "size": {
+        "height": 181,
+        "width": 219
+      },
+      "source": {
+        "instancePersistentUuid": "0d34f88c-6eac-430c-8991-dafeda033a3f",
+        "layer": "spawn_mobs",
+        "objectName": "regionSpawn_grassland_boar"
+      },
+      "spawnPadding": 0
+    },
+    {
+      "bounds": {
+        "maxX": 317,
+        "maxY": 1035.5,
+        "minX": 103,
+        "minY": 854.5
+      },
+      "enabled": true,
+      "id": "grassland_hare_01",
+      "mapId": "MAP_1",
+      "maxAlive": 3,
+      "mobType": "mob_hare",
+      "position": {
+        "x": 210,
+        "y": 945
+      },
+      "respawnSeconds": 10,
+      "size": {
+        "height": 181,
+        "width": 214
+      },
+      "source": {
+        "instancePersistentUuid": "48d6c061-cb2b-4367-bf59-7343b548616f",
+        "layer": "spawn_mobs",
+        "objectName": "regionSpawn_grassland_hare"
+      },
+      "spawnPadding": 0
+    }
+  ]
 }

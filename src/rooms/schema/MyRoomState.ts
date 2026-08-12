@@ -1,4 +1,5 @@
 import {
+  ArraySchema,
   Schema,
   MapSchema,
   type,
@@ -52,6 +53,20 @@ export class PlayerEquipmentState extends Schema {
   OffHand = new PlayerEquipmentSlotState();
 }
 
+export class PlayerInventorySlotState extends Schema {
+  @type("string")
+  id: string = "empty";
+
+  @type("string")
+  type: string = "0";
+
+  @type("string")
+  sub_type: string = "0";
+
+  @type("number")
+  quantity: number = 0;
+}
+
 export class PlayerState extends Schema {
   @type("number")
   x: number = 0;
@@ -88,6 +103,9 @@ export class PlayerState extends Schema {
 
   @type(PlayerEquipmentState)
   equipment = new PlayerEquipmentState();
+
+  @type([PlayerInventorySlotState])
+  inventory = new ArraySchema<PlayerInventorySlotState>();
 }
 
 export class MonsterState extends Schema {

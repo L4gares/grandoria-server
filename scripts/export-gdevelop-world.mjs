@@ -21,7 +21,7 @@ const ARTIFACT_SCHEMA_VERSION = 1;
 const EXPORTER_VERSION = 1;
 const MAP_ID = "MAP_1";
 const EXPECTED_PROJECT_FILE =
-  "RPG-2D-project-organized-by-systems-pre-combat-english.json";
+  "RPG-2D-project-Grandoria-Colyseus-authoritative-inventory-equipment.json";
 const EXPECTED_FIRST_LAYOUT = "Scene_Menu";
 const AUTHORING_GRID_SIZE = 16;
 
@@ -101,24 +101,7 @@ const AUTHORIZED_RECOVERY_ENTRY = {
   y: 626,
 };
 
-const AUTHORIZED_MONSTER_SPAWNS = [
-  {
-    bodyProfileId: "mob_boar",
-    direction: "down",
-    id: "map1_boar_001",
-    mapId: MAP_ID,
-    x: 144,
-    y: 1056,
-  },
-  {
-    bodyProfileId: "mob_hare",
-    direction: "down",
-    id: "map1_hare_001",
-    mapId: MAP_ID,
-    x: 168,
-    y: 968,
-  },
-].sort((left, right) => compareStrings(left.id, right.id));
+const SPAWN_REGION_OBJECT_PREFIX = "regionSpawn_";
 
 function compareStrings(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -961,6 +944,246 @@ function createColliderSource(objectRecord, instance, animation) {
     objectPersistentUuid: objectRecord.object.persistentUuid ?? null,
     objectScope: objectRecord.scope,
     objectType: objectRecord.object.type,
+  };
+}
+
+function requireSimpleVariable(variables, name, expectedType, label) {
+  assertCondition(Array.isArray(variables), `${label} variables are missing.`);
+  const matches = variables.filter((variable) => variable?.name === name);
+
+  assertCondition(matches.length === 1, `${label}.${name} is missing or duplicated.`);
+  assertCondition(
+    matches[0].type === expectedType,
+    `${label}.${name} must have type ${expectedType}.`,
+  );
+
+  return matches[0].value;
+}
+
+function readSpawnRegionVariable(object, instance, name, expectedType) {
+  const instanceVariables = Array.isArray(instance.initialVariables)
+    ? instance.initialVariables
+    : [];
+  const instanceMatches = instanceVariables.filter(
+    (variable) => variable?.name === name,
+  );
+
+  assertCondition(
+    instanceMatches.length <= 1,
+    `${instance.name}/${instance.persistentUuid}.${name} is duplicated on the instance.`,
+  );
+
+  if (instanceMatches.length === 1) {
+    assertCondition(
+      instanceMatches[0].type === expectedType,
+      `${instance.name}/${instance.persistentUuid}.${name} must have type ${expectedType}.`,
+    );
+    return instanceMatches[0].value;
+  }
+
+  return requireSimpleVariable(
+    object.variables,
+    name,
+    expectedType,
+    `Object ${object.name}`,
+  );
+}
+
+function extractSpawnRegionBounds(objectRecord, instance, resourceRegistry) {
+  const { object } = objectRecord;
+
+  assertCondition(
+    object.type === "Sprite",
+    `${object.name} must remain a Sprite spawn-region object.`,
+  );
+
+  const animationIndex = getSelectedAnimationIndex(instance);
+  const animation = object.animations?.[animationIndex];
+
+  assertCondition(animation, `${object.name} animation ${animationIndex} is missing.`);
+  assertCondition(
+    Array.isArray(animation.directions) && animation.directions.length === 1,
+    `${object.name} spawn region uses unsupported multiple directions.`,
+  );
+
+  const sprite = animation.directions[0].sprites?.[0];
+
+  assertCondition(sprite, `${object.name} spawn region has no source frame.`);
+
+  const image = resourceRegistry.addNamedImage(sprite.image, "spawn_region_geometry");
+  const origin = {
+    x: assertFiniteNumber(sprite.originPoint?.x, `${object.name} origin.x`),
+    y: assertFiniteNumber(sprite.originPoint?.y, `${object.name} origin.y`),
+  };
+  const width = instance.customSize === true
+    ? assertFiniteNumber(instance.width, `${object.name} instance width`)
+    : image.dimensions.width;
+  const height = instance.customSize === true
+    ? assertFiniteNumber(instance.height, `${object.name} instance height`)
+    : image.dimensions.height;
+
+  assertCondition(width > 0 && height > 0, `${object.name} spawn region has invalid size.`);
+
+  const transform = {
+    angle: assertFiniteNumber(instance.angle, `${object.name} instance angle`),
+    origin,
+    position: {
+      x: assertFiniteNumber(instance.x, `${object.name} instance x`),
+      y: assertFiniteNumber(instance.y, `${object.name} instance y`),
+    },
+    scale: {
+      x: width / image.dimensions.width,
+      y: height / image.dimensions.height,
+    },
+  };
+
+  assertCondition(
+    transform.angle === 0,
+    `${object.name} spawn region has unsupported non-zero rotation.`,
+  );
+
+  const sourcePolygon = [
+    { x: 0, y: 0 },
+    { x: image.dimensions.width, y: 0 },
+    { x: image.dimensions.width, y: image.dimensions.height },
+    { x: 0, y: image.dimensions.height },
+  ];
+  const worldPolygon = sourcePolygon.map((point) => transformPoint(point, transform));
+
+  return {
+    bounds: calculateAabb([worldPolygon]),
+    position: transform.position,
+    size: { width, height },
+  };
+}
+
+function extractSpawnRegions(layout, objectRegistry, resourceRegistry) {
+  const instances = layout.instances
+    .filter(
+      (instance) =>
+        typeof instance.name === "string" &&
+        instance.name.startsWith(SPAWN_REGION_OBJECT_PREFIX),
+    )
+    .sort((left, right) => compareStrings(left.persistentUuid, right.persistentUuid));
+
+  assertCondition(instances.length > 0, `${MAP_ID} has no spawn-region instances.`);
+
+  const seenRegionIds = new Set();
+  const regions = instances.map((instance) => {
+    assertCondition(
+      typeof instance.persistentUuid === "string" && instance.persistentUuid.length > 0,
+      `${instance.name} has no persistentUuid.`,
+    );
+
+    const objectRecord = objectRegistry.requireObject(instance.name);
+    const regionId = readSpawnRegionVariable(
+      objectRecord.object,
+      instance,
+      "RegionID",
+      "string",
+    );
+    const mobType = readSpawnRegionVariable(
+      objectRecord.object,
+      instance,
+      "MobType",
+      "string",
+    );
+    const maxAlive = readSpawnRegionVariable(
+      objectRecord.object,
+      instance,
+      "MaxAlive",
+      "number",
+    );
+    const respawnSeconds = readSpawnRegionVariable(
+      objectRecord.object,
+      instance,
+      "RespawnSeconds",
+      "number",
+    );
+    const spawnPadding = readSpawnRegionVariable(
+      objectRecord.object,
+      instance,
+      "SpawnPadding",
+      "number",
+    );
+    const enabled = readSpawnRegionVariable(
+      objectRecord.object,
+      instance,
+      "Enabled",
+      "boolean",
+    );
+
+    assertCondition(
+      typeof regionId === "string" && /^[A-Za-z0-9_-]+$/.test(regionId),
+      `${instance.name}/${instance.persistentUuid}.RegionID must use only letters, numbers, _ or -.`,
+    );
+    assertCondition(
+      !seenRegionIds.has(regionId),
+      `Duplicate spawn RegionID: ${regionId}.`,
+    );
+    seenRegionIds.add(regionId);
+
+    assertCondition(
+      typeof mobType === "string" && /^[A-Za-z0-9_-]+$/.test(mobType),
+      `${regionId}.MobType is invalid.`,
+    );
+    assertCondition(
+      Number.isInteger(maxAlive) && maxAlive >= 0 && maxAlive <= 1000,
+      `${regionId}.MaxAlive must be an integer from 0 to 1000.`,
+    );
+    assertCondition(
+      typeof respawnSeconds === "number" &&
+        Number.isFinite(respawnSeconds) &&
+        respawnSeconds >= 0,
+      `${regionId}.RespawnSeconds must be a non-negative number.`,
+    );
+    assertCondition(
+      typeof spawnPadding === "number" &&
+        Number.isFinite(spawnPadding) &&
+        spawnPadding >= 0,
+      `${regionId}.SpawnPadding must be a non-negative number.`,
+    );
+    assertCondition(typeof enabled === "boolean", `${regionId}.Enabled must be boolean.`);
+
+    const geometry = extractSpawnRegionBounds(
+      objectRecord,
+      instance,
+      resourceRegistry,
+    );
+
+    return {
+      ...geometry,
+      enabled,
+      id: regionId,
+      mapId: MAP_ID,
+      maxAlive,
+      mobType,
+      respawnSeconds,
+      source: {
+        instancePersistentUuid: instance.persistentUuid,
+        layer: instance.layer ?? "",
+        objectName: instance.name,
+      },
+      spawnPadding,
+    };
+  });
+
+  return regions.sort((left, right) => compareStrings(left.id, right.id));
+}
+
+function createSpawnRegionEvidenceBody(region) {
+  return {
+    worldBody: {
+      aabb: region.bounds,
+      polygons: [
+        [
+          { x: region.bounds.minX, y: region.bounds.minY },
+          { x: region.bounds.maxX, y: region.bounds.minY },
+          { x: region.bounds.maxX, y: region.bounds.maxY },
+          { x: region.bounds.minX, y: region.bounds.maxY },
+        ],
+      ],
+    },
   };
 }
 
@@ -2089,11 +2312,6 @@ function validateAnchors(project, bodyProfiles, colliders, candidatePlayableRegi
       collisionChannel: "player",
       kind: "player_recovery_entry",
     },
-    ...AUTHORIZED_MONSTER_SPAWNS.map((spawn) => ({
-      ...spawn,
-      collisionChannel: "monster",
-      kind: "monster_spawn",
-    })),
   ];
 
   return anchors
@@ -2234,20 +2452,26 @@ export function buildWorldArtifact({ projectPath }) {
     objectRegistry,
     resourceRegistry,
   );
+  const spawnRegions = extractSpawnRegions(
+    layout,
+    objectRegistry,
+    resourceRegistry,
+  );
 
+  const recoveryEvidence = {
+    ...AUTHORIZED_RECOVERY_ENTRY,
+    bodyProfileId: "character",
+  };
   const provisionalAnchors = [
     {
-      ...AUTHORIZED_RECOVERY_ENTRY,
-      bodyProfileId: "character",
+      ...recoveryEvidence,
+      worldBody: createAnchorWorldBody(
+        recoveryEvidence,
+        bodies.bodyProfiles.find((profile) => profile.id === "character"),
+      ),
     },
-    ...AUTHORIZED_MONSTER_SPAWNS,
-  ].map((anchor) => ({
-    ...anchor,
-    worldBody: createAnchorWorldBody(
-      anchor,
-      bodies.bodyProfiles.find((profile) => profile.id === anchor.bodyProfileId),
-    ),
-  }));
+    ...spawnRegions.map((region) => createSpawnRegionEvidenceBody(region)),
+  ];
   const candidatePlayableRegion = createCandidatePlayableRegion(
     extractedColliders.colliders,
     provisionalAnchors,
@@ -2263,7 +2487,7 @@ export function buildWorldArtifact({ projectPath }) {
 
   const artifact = {
     anchors: {
-      monsterSpawns: anchors.filter((anchor) => anchor.kind === "monster_spawn"),
+      monsterSpawns: [],
       recoveryEntries: anchors.filter(
         (anchor) => anchor.kind === "player_recovery_entry",
       ),
@@ -2341,6 +2565,7 @@ export function buildWorldArtifact({ projectPath }) {
     exporterVersion: EXPORTER_VERSION,
     mapContext: tileContext.context,
     mapId: MAP_ID,
+    spawnRegions,
     source: {
       project: {
         file: EXPECTED_PROJECT_FILE,
@@ -2448,6 +2673,23 @@ export function createSvgPreview(artifact) {
 
     return `<g class="world-shape"><line x1="${x - 7}" y1="${y - 7}" x2="${x + 7}" y2="${y + 7}" class="degenerate" /><line x1="${x + 7}" y1="${y - 7}" x2="${x - 7}" y2="${y + 7}" class="degenerate" /></g>`;
   });
+  const spawnRegionShapes = artifact.spawnRegions.flatMap((region) => {
+    const color = region.mobType === "mob_hare" ? "#eab308" : "#dc2626";
+    const polygon = [
+      { x: region.bounds.minX, y: region.bounds.minY },
+      { x: region.bounds.maxX, y: region.bounds.minY },
+      { x: region.bounds.maxX, y: region.bounds.maxY },
+      { x: region.bounds.minX, y: region.bounds.maxY },
+    ];
+
+    return [
+      svgPolygon(
+        polygon,
+        `fill="${color}" fill-opacity="0.10" stroke="${color}" stroke-width="3" stroke-dasharray="8 6" class="world-shape"`,
+      ),
+      `<text x="${region.bounds.minX + 6}" y="${region.bounds.minY + 22}" class="anchor-label">${escapeXml(region.id)} (${escapeXml(region.mobType)})</text>`,
+    ];
+  });
   const anchorShapes = [
     ...artifact.anchors.recoveryEntries,
     ...artifact.anchors.monsterSpawns,
@@ -2539,6 +2781,7 @@ export function createSvgPreview(artifact) {
   ${duplicateShape.join("\n  ")}
   ${colliderShapes.join("\n  ")}
   ${degenerateShapes.join("\n  ")}
+  ${spawnRegionShapes.join("\n  ")}
   ${anchorShapes.join("\n  ")}
   <g aria-label="Legend">${legend}</g>
 </svg>

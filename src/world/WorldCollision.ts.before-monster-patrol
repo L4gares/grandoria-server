@@ -16,27 +16,6 @@ type Aabb = {
 
 type Polygon = Point[];
 
-export type MonsterSpawnRegion = {
-  bounds: Aabb;
-  enabled: boolean;
-  id: string;
-  mapId: string;
-  maxAlive: number;
-  mobType: string;
-  position: Point;
-  respawnSeconds: number;
-  size: {
-    width: number;
-    height: number;
-  };
-  source: {
-    instancePersistentUuid: string;
-    layer: string;
-    objectName: string;
-  };
-  spawnPadding: number;
-};
-
 type WorldCollider = {
   collisionChannels: string[];
   geometry: {
@@ -63,7 +42,6 @@ type WorldArtifact = {
   }>;
   colliders: WorldCollider[];
   mapId: string;
-  spawnRegions: MonsterSpawnRegion[];
 };
 
 type WorldBody = {
@@ -71,29 +49,20 @@ type WorldBody = {
   polygons: Polygon[];
 };
 
-type CollisionBodyProfile = {
-  localAabb: Aabb;
-  localPolygons: Polygon[];
-};
-
 type CollisionWorld = {
-  bodyProfiles: Map<string, CollisionBodyProfile>;
-  collidersByChannel: Map<string, Map<string, WorldCollider[]>>;
+  bodyLocalAabb: Aabb;
+  bodyLocalPolygons: Polygon[];
+  collidersByCell: Map<string, WorldCollider[]>;
   mapId: string;
   recovery: Point;
-  spawnRegions: MonsterSpawnRegion[];
 };
 
-export type MovementResolution = {
+export type PlayerMovementResolution = {
   blockedX: boolean;
   blockedY: boolean;
   x: number;
   y: number;
 };
-
-export type PlayerMovementResolution = MovementResolution;
-
-export type MonsterMovementResolution = MovementResolution;
 
 export type PlayerSpawnResolution = {
   recovered: boolean;
@@ -105,7 +74,6 @@ const ARTIFACT_SCHEMA_VERSION = 1;
 const DEFAULT_MAP_ID = "MAP_1";
 const GEOMETRY_EPSILON = 1e-9;
 const MAX_MOVEMENT_SUBSTEP = 0.5;
-const MONSTER_COLLISION_CHANNEL = "monster";
 const PLAYER_BODY_PROFILE_ID = "character";
 const PLAYER_COLLISION_CHANNEL = "player";
 const SPATIAL_CELL_SIZE = 64;
@@ -234,49 +202,33 @@ function loadCollisionWorld(fileName: string): CollisionWorld {
     typeof artifact.mapId !== "string" ||
     !Array.isArray(artifact.bodyProfiles) ||
     !Array.isArray(artifact.colliders) ||
-    !Array.isArray(artifact.spawnRegions) ||
     !isRecord(artifact.anchors) ||
     !Array.isArray(artifact.anchors.recoveryEntries)
   ) {
     throw new Error(`[Grandoria] Unsupported world artifact: ${fileName}.`);
   }
 
-  const bodyProfiles = new Map<string, CollisionBodyProfile>();
+  const bodyProfile = artifact.bodyProfiles.find(
+    (profile) => profile.id === PLAYER_BODY_PROFILE_ID,
+  );
 
-  artifact.bodyProfiles.forEach((profile, profileIndex) => {
-    if (
-      !isRecord(profile) ||
-      typeof profile.id !== "string" ||
-      !isRecord(profile.movementBody) ||
-      !Array.isArray(profile.movementBody.originRelativePolygons)
-    ) {
-      throw new Error(
-        `[Grandoria] Invalid body profile ${profileIndex} in ${fileName}.`,
-      );
-    }
-
-    const localPolygons = profile.movementBody.originRelativePolygons;
-
-    localPolygons.forEach((polygon, polygonIndex) => {
-      assertPolygon(
-        polygon,
-        `${fileName} body profile ${profile.id}:${polygonIndex}`,
-      );
-    });
-
-    bodyProfiles.set(profile.id, {
-      localAabb: calculateAabb(localPolygons),
-      localPolygons,
-    });
-  });
-
-  if (!bodyProfiles.has(PLAYER_BODY_PROFILE_ID)) {
+  if (
+    !bodyProfile ||
+    !isRecord(bodyProfile.movementBody) ||
+    !Array.isArray(bodyProfile.movementBody.originRelativePolygons)
+  ) {
     throw new Error(
       `[Grandoria] Player body profile is missing from ${fileName}.`,
     );
   }
 
-  const colliders = artifact.colliders.filter((collider, index) => {
+  const bodyLocalPolygons = bodyProfile.movementBody.originRelativePolygons;
+
+  bodyLocalPolygons.forEach((polygon, index) => {
+    assertPolygon(polygon, `${fileName} player body ${index}`);
+  });
+
+  const playerColliders = artifact.colliders.filter((collider, index) => {
     if (
       !isRecord(collider) ||
       typeof collider.id !== "string" ||
@@ -292,34 +244,8 @@ function loadCollisionWorld(fileName: string): CollisionWorld {
       assertPolygon(polygon, `${fileName} collider ${index}:${polygonIndex}`);
     });
 
-    return true;
+    return collider.collisionChannels.includes(PLAYER_COLLISION_CHANNEL);
   });
-
-  const collidersByChannel = new Map<
-    string,
-    Map<string, WorldCollider[]>
-  >();
-
-  const collisionChannels = new Set(
-    colliders.flatMap((collider) => collider.collisionChannels),
-  );
-
-  for (const collisionChannel of collisionChannels) {
-    collidersByChannel.set(
-      collisionChannel,
-      indexColliders(
-        colliders.filter((collider) =>
-          collider.collisionChannels.includes(collisionChannel),
-        ),
-      ),
-    );
-  }
-
-  if (!collidersByChannel.has(PLAYER_COLLISION_CHANNEL)) {
-    throw new Error(
-      `[Grandoria] Player collision channel is missing from ${fileName}.`,
-    );
-  }
 
   const recoveryEntry = artifact.anchors.recoveryEntries.find(
     (entry) =>
@@ -332,84 +258,27 @@ function loadCollisionWorld(fileName: string): CollisionWorld {
     throw new Error(`[Grandoria] Recovery entry is missing from ${fileName}.`);
   }
 
-  const seenSpawnRegionIds = new Set<string>();
-  const spawnRegions = artifact.spawnRegions.map((region, regionIndex) => {
-    if (
-      !isRecord(region) ||
-      typeof region.id !== "string" ||
-      region.id.length === 0 ||
-      typeof region.mapId !== "string" ||
-      region.mapId !== artifact.mapId ||
-      typeof region.mobType !== "string" ||
-      region.mobType.length === 0 ||
-      !Number.isInteger(region.maxAlive) ||
-      region.maxAlive < 0 ||
-      region.maxAlive > 1000 ||
-      typeof region.respawnSeconds !== "number" ||
-      !Number.isFinite(region.respawnSeconds) ||
-      region.respawnSeconds < 0 ||
-      typeof region.spawnPadding !== "number" ||
-      !Number.isFinite(region.spawnPadding) ||
-      region.spawnPadding < 0 ||
-      typeof region.enabled !== "boolean" ||
-      !isFiniteAabb(region.bounds) ||
-      region.bounds.minX >= region.bounds.maxX ||
-      region.bounds.minY >= region.bounds.maxY ||
-      !isFinitePoint(region.position) ||
-      !isRecord(region.size) ||
-      typeof region.size.width !== "number" ||
-      !Number.isFinite(region.size.width) ||
-      region.size.width <= 0 ||
-      typeof region.size.height !== "number" ||
-      !Number.isFinite(region.size.height) ||
-      region.size.height <= 0 ||
-      !isRecord(region.source) ||
-      typeof region.source.instancePersistentUuid !== "string" ||
-      region.source.instancePersistentUuid.length === 0 ||
-      typeof region.source.layer !== "string" ||
-      typeof region.source.objectName !== "string" ||
-      region.source.objectName.length === 0
-    ) {
-      throw new Error(
-        `[Grandoria] Invalid spawn region ${regionIndex} in ${fileName}.`,
-      );
-    }
-
-    if (seenSpawnRegionIds.has(region.id)) {
-      throw new Error(
-        `[Grandoria] Duplicate spawn region id ${region.id} in ${fileName}.`,
-      );
-    }
-
-    seenSpawnRegionIds.add(region.id);
-    return region as MonsterSpawnRegion;
-  });
-
   return {
-    bodyProfiles,
-    collidersByChannel,
+    bodyLocalAabb: calculateAabb(bodyLocalPolygons),
+    bodyLocalPolygons,
+    collidersByCell: indexColliders(playerColliders),
     mapId: artifact.mapId,
     recovery: {
       x: recoveryEntry.x,
       y: recoveryEntry.y,
     },
-    spawnRegions,
   };
 }
 
-function translateBody(
-  bodyProfile: CollisionBodyProfile,
-  x: number,
-  y: number,
-): WorldBody {
+function translatePlayerBody(world: CollisionWorld, x: number, y: number): WorldBody {
   return {
     aabb: {
-      minX: x + bodyProfile.localAabb.minX,
-      maxX: x + bodyProfile.localAabb.maxX,
-      minY: y + bodyProfile.localAabb.minY,
-      maxY: y + bodyProfile.localAabb.maxY,
+      minX: x + world.bodyLocalAabb.minX,
+      maxX: x + world.bodyLocalAabb.maxX,
+      minY: y + world.bodyLocalAabb.minY,
+      maxY: y + world.bodyLocalAabb.maxY,
     },
-    polygons: bodyProfile.localPolygons.map((polygon) =>
+    polygons: world.bodyLocalPolygons.map((polygon) =>
       polygon.map((point) => ({
         x: x + point.x,
         y: y + point.y,
@@ -524,7 +393,7 @@ function aabbsIntersect(first: Aabb, second: Aabb): boolean {
 }
 
 function nearbyColliders(
-  collidersByCell: Map<string, WorldCollider[]>,
+  world: CollisionWorld,
   aabb: Aabb,
 ): WorldCollider[] {
   const [minCellX, maxCellX] = cellRange(aabb.minX, aabb.maxX);
@@ -533,7 +402,7 @@ function nearbyColliders(
 
   for (let cellX = minCellX; cellX <= maxCellX; cellX += 1) {
     for (let cellY = minCellY; cellY <= maxCellY; cellY += 1) {
-      const entries = collidersByCell.get(cellKey(cellX, cellY));
+      const entries = world.collidersByCell.get(cellKey(cellX, cellY));
 
       if (!entries) {
         continue;
@@ -548,23 +417,10 @@ function nearbyColliders(
   return [...result.values()];
 }
 
-function bodyOverlapsWorld(
-  world: CollisionWorld,
-  bodyProfileId: string,
-  collisionChannel: string,
-  x: number,
-  y: number,
-): boolean {
-  const bodyProfile = world.bodyProfiles.get(bodyProfileId);
-  const collidersByCell = world.collidersByChannel.get(collisionChannel);
+function playerOverlapsWorld(world: CollisionWorld, x: number, y: number): boolean {
+  const body = translatePlayerBody(world, x, y);
 
-  if (!bodyProfile || !collidersByCell) {
-    return true;
-  }
-
-  const body = translateBody(bodyProfile, x, y);
-
-  return nearbyColliders(collidersByCell, body.aabb).some((collider) => {
+  return nearbyColliders(world, body.aabb).some((collider) => {
     if (!aabbsIntersect(body.aabb, collider.geometry.aabb)) {
       return false;
     }
@@ -577,15 +433,56 @@ function bodyOverlapsWorld(
   });
 }
 
-function resolveBodyMovement(
+const collisionWorlds = new Map<string, CollisionWorld>();
+const map1World = loadCollisionWorld("MAP_1.world.json");
+
+collisionWorlds.set(map1World.mapId, map1World);
+
+export function normalizeWorldMapId(mapId: string): string {
+  return collisionWorlds.has(mapId) ? mapId : DEFAULT_MAP_ID;
+}
+
+export function resolvePlayerSpawn(
   mapId: string,
-  bodyProfileId: string,
-  collisionChannel: string,
+  requestedX: number,
+  requestedY: number,
+): PlayerSpawnResolution {
+  const world = collisionWorlds.get(mapId);
+
+  if (!world) {
+    throw new Error(`[Grandoria] Collision world is not loaded for ${mapId}.`);
+  }
+
+  if (
+    Number.isFinite(requestedX) &&
+    Number.isFinite(requestedY) &&
+    !playerOverlapsWorld(world, requestedX, requestedY)
+  ) {
+    return {
+      recovered: false,
+      x: requestedX,
+      y: requestedY,
+    };
+  }
+
+  if (playerOverlapsWorld(world, world.recovery.x, world.recovery.y)) {
+    throw new Error(`[Grandoria] Invalid recovery entry for ${mapId}.`);
+  }
+
+  return {
+    recovered: true,
+    x: world.recovery.x,
+    y: world.recovery.y,
+  };
+}
+
+export function resolvePlayerMovement(
+  mapId: string,
   currentX: number,
   currentY: number,
   deltaX: number,
   deltaY: number,
-): MovementResolution {
+): PlayerMovementResolution {
   const world = collisionWorlds.get(mapId);
 
   if (!world) {
@@ -614,15 +511,7 @@ function resolveBodyMovement(
     if (stepX !== 0) {
       const nextX = x + stepX;
 
-      if (
-        bodyOverlapsWorld(
-          world,
-          bodyProfileId,
-          collisionChannel,
-          nextX,
-          y,
-        )
-      ) {
+      if (playerOverlapsWorld(world, nextX, y)) {
         blockedX = true;
       } else {
         x = nextX;
@@ -632,15 +521,7 @@ function resolveBodyMovement(
     if (stepY !== 0) {
       const nextY = y + stepY;
 
-      if (
-        bodyOverlapsWorld(
-          world,
-          bodyProfileId,
-          collisionChannel,
-          x,
-          nextY,
-        )
-      ) {
+      if (playerOverlapsWorld(world, x, nextY)) {
         blockedY = true;
       } else {
         y = nextY;
@@ -654,175 +535,4 @@ function resolveBodyMovement(
     x,
     y,
   };
-}
-
-const collisionWorlds = new Map<string, CollisionWorld>();
-const map1World = loadCollisionWorld("MAP_1.world.json");
-
-collisionWorlds.set(map1World.mapId, map1World);
-
-export function normalizeWorldMapId(mapId: string): string {
-  return collisionWorlds.has(mapId) ? mapId : DEFAULT_MAP_ID;
-}
-
-export function resolvePlayerSpawn(
-  mapId: string,
-  requestedX: number,
-  requestedY: number,
-): PlayerSpawnResolution {
-  const world = collisionWorlds.get(mapId);
-
-  if (!world) {
-    throw new Error(`[Grandoria] Collision world is not loaded for ${mapId}.`);
-  }
-
-  if (
-    Number.isFinite(requestedX) &&
-    Number.isFinite(requestedY) &&
-    !bodyOverlapsWorld(
-      world,
-      PLAYER_BODY_PROFILE_ID,
-      PLAYER_COLLISION_CHANNEL,
-      requestedX,
-      requestedY,
-    )
-  ) {
-    return {
-      recovered: false,
-      x: requestedX,
-      y: requestedY,
-    };
-  }
-
-  if (
-    bodyOverlapsWorld(
-      world,
-      PLAYER_BODY_PROFILE_ID,
-      PLAYER_COLLISION_CHANNEL,
-      world.recovery.x,
-      world.recovery.y,
-    )
-  ) {
-    throw new Error(`[Grandoria] Invalid recovery entry for ${mapId}.`);
-  }
-
-  return {
-    recovered: true,
-    x: world.recovery.x,
-    y: world.recovery.y,
-  };
-}
-
-export function resolvePlayerMovement(
-  mapId: string,
-  currentX: number,
-  currentY: number,
-  deltaX: number,
-  deltaY: number,
-): PlayerMovementResolution {
-  return resolveBodyMovement(
-    mapId,
-    PLAYER_BODY_PROFILE_ID,
-    PLAYER_COLLISION_CHANNEL,
-    currentX,
-    currentY,
-    deltaX,
-    deltaY,
-  );
-}
-
-export function resolveMonsterMovement(
-  mapId: string,
-  bodyProfileId: string,
-  currentX: number,
-  currentY: number,
-  deltaX: number,
-  deltaY: number,
-): MonsterMovementResolution {
-  return resolveBodyMovement(
-    mapId,
-    bodyProfileId,
-    MONSTER_COLLISION_CHANNEL,
-    currentX,
-    currentY,
-    deltaX,
-    deltaY,
-  );
-}
-
-export function getMonsterSpawnRegions(
-  mapId: string,
-): readonly MonsterSpawnRegion[] {
-  const world = collisionWorlds.get(mapId);
-
-  if (!world) {
-    throw new Error(`[Grandoria] Collision world is not loaded for ${mapId}.`);
-  }
-
-  return world.spawnRegions;
-}
-
-export function findMonsterSpawnPoint(
-  mapId: string,
-  bodyProfileId: string,
-  region: MonsterSpawnRegion,
-  random: () => number = Math.random,
-  attempts: number = 64,
-): Point | null {
-  const world = collisionWorlds.get(mapId);
-
-  if (!world || region.mapId !== mapId || !region.enabled) {
-    return null;
-  }
-
-  const bodyProfile = world.bodyProfiles.get(bodyProfileId);
-
-  if (!bodyProfile) {
-    return null;
-  }
-
-  const minimumOriginX =
-    region.bounds.minX + region.spawnPadding - bodyProfile.localAabb.minX;
-  const maximumOriginX =
-    region.bounds.maxX - region.spawnPadding - bodyProfile.localAabb.maxX;
-  const minimumOriginY =
-    region.bounds.minY + region.spawnPadding - bodyProfile.localAabb.minY;
-  const maximumOriginY =
-    region.bounds.maxY - region.spawnPadding - bodyProfile.localAabb.maxY;
-
-  if (
-    minimumOriginX > maximumOriginX ||
-    minimumOriginY > maximumOriginY
-  ) {
-    return null;
-  }
-
-  const attemptCount = Math.max(1, Math.min(256, Math.trunc(attempts)));
-
-  for (let attempt = 0; attempt < attemptCount; attempt += 1) {
-    const randomX = random();
-    const randomY = random();
-    const unitX = Number.isFinite(randomX)
-      ? Math.min(1, Math.max(0, randomX))
-      : 0;
-    const unitY = Number.isFinite(randomY)
-      ? Math.min(1, Math.max(0, randomY))
-      : 0;
-    const x = minimumOriginX + (maximumOriginX - minimumOriginX) * unitX;
-    const y = minimumOriginY + (maximumOriginY - minimumOriginY) * unitY;
-
-    if (
-      !bodyOverlapsWorld(
-        world,
-        bodyProfileId,
-        MONSTER_COLLISION_CHANNEL,
-        x,
-        y,
-      )
-    ) {
-      return { x, y };
-    }
-  }
-
-  return null;
 }

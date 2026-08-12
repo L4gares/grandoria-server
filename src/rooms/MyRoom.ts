@@ -1,10 +1,23 @@
-import { Room, Client, CloseCode } from "colyseus";
+import {
+  Room,
+  Client,
+  CloseCode,
+  ErrorCode,
+  ServerError,
+  type AuthContext,
+} from "colyseus";
+
+import {
+  firebaseAdminAuth,
+  firebaseAdminFirestore,
+} from "../firebase/FirebaseAdmin.js";
 
 import {
   MyRoomState,
   MonsterState,
   PlayerState,
   PlayerEquipmentSlotState,
+  PlayerInventorySlotState,
   WorldItemState,
 } from "./schema/MyRoomState.js";
 
@@ -14,10 +27,13 @@ import {
 } from "../items/ItemCatalog.js";
 
 import {
+  findMonsterSpawnPoint,
+  getMonsterSpawnRegions,
   normalizeWorldMapId,
   resolveMonsterMovement,
   resolvePlayerMovement,
   resolvePlayerSpawn,
+  type MonsterSpawnRegion,
 } from "../world/WorldCollision.js";
 
 type InputMessage = {
@@ -49,6 +65,20 @@ type CollectItemMessage = {
   sharedItemId?: unknown;
   itemID?: unknown;
   itemId?: unknown;
+};
+
+type SetInventoryOrderMessage = {
+  inventory?: unknown;
+  Inventory?: unknown;
+  requestId?: unknown;
+  RequestID?: unknown;
+};
+
+type SetMaxHealthMessage = {
+  maxHealth?: unknown;
+  MaxHP?: unknown;
+  requestId?: unknown;
+  RequestID?: unknown;
 };
 
 type PlayerInput = {
@@ -88,6 +118,8 @@ type JoinOptions = {
 };
 
 type SetEquipmentMessage = {
+  requestId?: unknown;
+  RequestID?: unknown;
   slot?: unknown;
   item?: unknown;
   equipment?: unknown;
@@ -98,6 +130,27 @@ type PlayerIdentity = {
   playerUid: string;
   characterId: string;
   mapId: string;
+};
+
+type AuthenticatedPlayer = {
+  uid: string;
+  characterId: string;
+
+  location: {
+    mapId: string;
+    x: number;
+    y: number;
+    direction: string;
+  };
+
+  equipment: Record<EquipmentSlotName, EquipmentSlotData>;
+
+  inventory: InventorySlotData[];
+
+  resources: {
+    currentHealth: number;
+    maxHealth: number;
+  };
 };
 
 type EquipmentSlotName =
@@ -112,6 +165,10 @@ type EquipmentSlotData = {
   id: string;
   type: string;
   sub_type: string;
+};
+
+type InventorySlotData = EquipmentSlotData & {
+  quantity: number;
 };
 
 type Hitbox = {
@@ -143,7 +200,7 @@ type MonsterDefinition = {
   targetStopDistance: number;
   hurtDurationMs: number;
   deathDurationMs: number;
-  respawnDelayMs: number;
+  xpReward: number;
   hitboxOffsets: HitboxOffsets;
   attack?: MonsterAttackDefinition;
 };
@@ -161,7 +218,7 @@ const MONSTER_DEFINITIONS = {
     targetStopDistance: 0,
     hurtDurationMs: 320,
     deathDurationMs: 480,
-    respawnDelayMs: 10_000,
+    xpReward: 20,
     hitboxOffsets: {
       minX: -6.5,
       maxX: 7,
@@ -181,7 +238,7 @@ const MONSTER_DEFINITIONS = {
     targetStopDistance: 16,
     hurtDurationMs: 320,
     deathDurationMs: 480,
-    respawnDelayMs: 10_000,
+    xpReward: 50,
     hitboxOffsets: {
       minX: -6.5,
       maxX: 5.5,
@@ -257,13 +314,14 @@ type MonsterSpawn = {
   monsterId: string;
   monsterType: MonsterType;
   mapId: string;
+  regionId: string;
   x: number;
   y: number;
   direction: MonsterDirection;
 };
 
 const PLAYER_SPEED = 90;
-const PLAYER_MAX_HEALTH = 50;
+const DEFAULT_PLAYER_MAX_HEALTH = 50;
 const PLAYER_RESPAWN_DELAY_MS = 3_000;
 const PLAYER_RESPAWN_HEALTH_RATIO = 0.5;
 const PLAYER_RESPAWN_POINTS = [
@@ -290,28 +348,7 @@ const MONSTER_PATROL_DIRECTIONS: readonly MonsterDirection[] = [
   "up",
 ];
 
-const MONSTER_SPAWNS: readonly MonsterSpawn[] = [
-  {
-    monsterId: "map1_hare_001",
-    monsterType: "mob_hare",
-    mapId: "MAP_1",
-    x: 168,
-    y: 968,
-    direction: "down",
-  },
-  {
-    monsterId: "map1_boar_001",
-    monsterType: "mob_boar",
-    mapId: "MAP_1",
-    x: 144,
-    y: 1056,
-    direction: "down",
-  },
-];
-
-const MONSTER_SPAWNS_BY_ID = new Map<string, MonsterSpawn>(
-  MONSTER_SPAWNS.map((spawn) => [spawn.monsterId, spawn]),
-);
+const MONSTER_SPAWN_RETRY_DELAY_MS = 1_000;
 
 /*
  * Four frames at 0.08 seconds each:
@@ -581,6 +618,96 @@ function applyEquipmentSlot(
   return true;
 }
 
+function createEmptyEquipmentSlotData(): EquipmentSlotData {
+  return {
+    id: "empty",
+    type: "0",
+    sub_type: "0",
+  };
+}
+
+function readEquipmentData(value: unknown): Record<EquipmentSlotName, EquipmentSlotData> {
+  const source = readObject(value);
+
+  return {
+    Head:
+      parseEquipmentSlot(readFirstDefined(source, ["Head", "head"])) ??
+      createEmptyEquipmentSlotData(),
+    Tronco:
+      parseEquipmentSlot(
+        readFirstDefined(source, ["Tronco", "tronco", "Chest", "chest"]),
+      ) ?? createEmptyEquipmentSlotData(),
+    Legs:
+      parseEquipmentSlot(
+        readFirstDefined(source, ["Legs", "legs", "Pants", "pants"]),
+      ) ?? createEmptyEquipmentSlotData(),
+    Foots:
+      parseEquipmentSlot(
+        readFirstDefined(source, [
+          "Foots",
+          "foots",
+          "Feet",
+          "feet",
+          "Boots",
+          "boots",
+        ]),
+      ) ?? createEmptyEquipmentSlotData(),
+    Weapons:
+      parseEquipmentSlot(
+        readFirstDefined(source, ["Weapons", "weapons", "Weapon", "weapon"]),
+      ) ?? createEmptyEquipmentSlotData(),
+    OffHand:
+      parseEquipmentSlot(
+        readFirstDefined(source, [
+          "OffHand",
+          "offHand",
+          "offhand",
+          "Off_Hand",
+          "off_hand",
+          "Shield",
+          "shield",
+        ]),
+      ) ?? createEmptyEquipmentSlotData(),
+  };
+}
+
+function readInventoryData(value: unknown): InventorySlotData[] {
+  const source = Array.isArray(value) ? value : [];
+  const inventory: InventorySlotData[] = [];
+
+  for (let slotIndex = 0; slotIndex < 20; slotIndex += 1) {
+    const slotSource = readObject(source[slotIndex]);
+    const id = readEquipmentText(slotSource.id ?? slotSource.ID, "empty");
+    const quantityValue = readFiniteNumber(
+      slotSource.quantity ?? slotSource.Quantity,
+      0,
+    );
+    const quantity = Math.max(0, Math.trunc(quantityValue));
+
+    if (id === "empty" || id === "0" || quantity === 0) {
+      inventory.push({
+        id: "empty",
+        type: "0",
+        sub_type: "0",
+        quantity: 0,
+      });
+      continue;
+    }
+
+    inventory.push({
+      id,
+      type: readEquipmentText(slotSource.type ?? slotSource.Type, "0"),
+      sub_type: readEquipmentText(
+        slotSource.sub_type ?? slotSource.subType ?? slotSource.SubType,
+        "0",
+      ),
+      quantity,
+    });
+  }
+
+  return inventory;
+}
+
 function readEquipmentSlotName(value: unknown): EquipmentSlotName | null {
   if (typeof value !== "string") {
     return null;
@@ -645,6 +772,254 @@ function getEquipmentSlot(
 export class MyRoom extends Room<{
   state: MyRoomState;
 }> {
+   static async onAuth(
+    token: string,
+    options: unknown,
+    _context: AuthContext,
+  ): Promise<AuthenticatedPlayer> {
+    const firebaseIdToken =
+      typeof token === "string" ? token.trim() : "";
+
+    const joinOptions =
+      typeof options === "object" && options !== null
+        ? (options as JoinOptions)
+        : ({} as JoinOptions);
+
+    const characterId = readSafeStringFromAliases(
+      [joinOptions.characterId, joinOptions.CharacterID],
+      128,
+    );
+
+    if (firebaseIdToken === "") {
+      console.warn(
+        "[Grandoria] Authentication rejected: Firebase ID token is missing.",
+      );
+
+      throw new ServerError(
+        ErrorCode.AUTH_FAILED,
+        "Authentication failed.",
+      );
+    }
+
+    if (
+      characterId === "" ||
+      characterId.includes("/")
+    ) {
+      console.warn(
+        "[Grandoria] Authentication rejected: CharacterID is missing or invalid.",
+      );
+
+      throw new ServerError(
+        ErrorCode.AUTH_FAILED,
+        "Authentication failed.",
+      );
+    }
+
+    let authenticatedUid = "";
+
+    try {
+      const decodedToken =
+        await firebaseAdminAuth.verifyIdToken(
+          firebaseIdToken,
+          true,
+        );
+
+      authenticatedUid = decodedToken.uid;
+    } catch (error) {
+      const errorCode =
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        typeof error.code === "string"
+          ? error.code
+          : "unknown";
+
+      console.warn(
+        "[Grandoria] Authentication rejected:",
+        errorCode,
+      );
+
+      throw new ServerError(
+        ErrorCode.AUTH_FAILED,
+        "Authentication failed.",
+      );
+    }
+
+    let authenticatedLocation: AuthenticatedPlayer["location"] | null = null;
+    let authenticatedEquipment: AuthenticatedPlayer["equipment"] | null = null;
+    let authenticatedInventory: AuthenticatedPlayer["inventory"] | null = null;
+    let authenticatedResources: AuthenticatedPlayer["resources"] | null = null;
+
+    try {
+  const characterSnapshot =
+    await firebaseAdminFirestore
+      .collection("users")
+      .doc(authenticatedUid)
+      .collection("characters")
+      .doc(characterId)
+      .get();
+
+  if (!characterSnapshot.exists) {
+    console.warn(
+      "[Grandoria] Authentication rejected: character does not belong to the authenticated user.",
+    );
+
+    throw new ServerError(
+      ErrorCode.AUTH_FAILED,
+      "Authentication failed.",
+    );
+  }
+
+  const characterData =
+    readObject(characterSnapshot.data());
+
+  authenticatedEquipment = readEquipmentData(
+    characterData.Equipment ?? characterData.equipment,
+  );
+
+  authenticatedInventory = readInventoryData(
+    characterData.Inventory ?? characterData.inventory,
+  );
+
+  const resourcesData = readObject(
+    characterData.Resources ?? characterData.resources,
+  );
+  const maxHealth = Math.max(
+    1,
+    Math.trunc(
+      readFiniteNumberFromAliases(
+        [resourcesData.MaxHP, resourcesData.maxHP, resourcesData.maxHealth],
+        DEFAULT_PLAYER_MAX_HEALTH,
+      ),
+    ),
+  );
+  const currentHealth = Math.min(
+    maxHealth,
+    Math.max(
+      0,
+      Math.trunc(
+        readFiniteNumberFromAliases(
+          [
+            resourcesData.CurrentHP,
+            resourcesData.currentHP,
+            resourcesData.currentHealth,
+          ],
+          maxHealth,
+        ),
+      ),
+    ),
+  );
+
+  authenticatedResources = {
+    currentHealth,
+    maxHealth,
+  };
+
+  const locationData =
+    readObject(
+      characterData.Location ??
+      characterData.location,
+    );
+
+  const mapId =
+    normalizeWorldMapId(
+      readSafeStringFromAliases(
+        [
+          locationData.Map,
+          locationData.map,
+          locationData.MapID,
+          locationData.mapId,
+        ],
+        64,
+      ),
+    );
+
+  const savedX =
+    readFiniteNumberFromAliases(
+      [
+        locationData.X,
+        locationData.x,
+      ],
+      Number.NaN,
+    );
+
+  const savedY =
+    readFiniteNumberFromAliases(
+      [
+        locationData.Y,
+        locationData.y,
+      ],
+      Number.NaN,
+    );
+
+  const spawn =
+    resolvePlayerSpawn(
+      mapId,
+      savedX,
+      savedY,
+    );
+
+  authenticatedLocation = {
+    mapId,
+    x: spawn.x,
+    y: spawn.y,
+
+    direction:
+      readDirectionFromAliases([
+        locationData.Direction,
+        locationData.direction,
+      ]),
+  };
+} catch (error) {
+  if (error instanceof ServerError) {
+    throw error;
+  }
+
+  const errorCode =
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+      ? error.code
+      : "unknown";
+
+  console.error(
+    "[Grandoria] Character data lookup failed:",
+    errorCode,
+  );
+
+  throw new ServerError(
+    ErrorCode.AUTH_FAILED,
+    "Authentication failed.",
+  );
+}
+
+if (
+  !authenticatedLocation ||
+  !authenticatedEquipment ||
+  !authenticatedInventory ||
+  !authenticatedResources
+) {
+  console.warn(
+    "[Grandoria] Authentication rejected: persistent character data is missing.",
+  );
+
+  throw new ServerError(
+    ErrorCode.AUTH_FAILED,
+    "Authentication failed.",
+  );
+}
+
+    return {
+      uid: authenticatedUid,
+      characterId,
+      location: authenticatedLocation,
+      equipment: authenticatedEquipment,
+      inventory: authenticatedInventory,
+      resources: authenticatedResources,
+    };
+  }
+
   maxClients = 50;
 
   maxMessagesPerSecond = 120;
@@ -700,6 +1075,15 @@ export class MyRoom extends Room<{
   private readonly completedDropRequests = new Map<
     string,
     Map<string, Record<string, unknown>>
+  >();
+
+  private readonly playerInventoryOperations = new Set<string>();
+
+  private readonly monsterSpawnsById = new Map<string, MonsterSpawn>();
+
+  private readonly monsterRegionsByMonsterId = new Map<
+    string,
+    MonsterSpawnRegion
   >();
 
   private monsterRandom: () => number = Math.random;
@@ -782,54 +1166,32 @@ export class MyRoom extends Room<{
       player.animation = "attack";
     },
 
-    set_equipment: (client: Client, message: SetEquipmentMessage) => {
-      const player = this.state.players.get(client.sessionId);
-
-      if (!player) {
-        return;
-      }
-
-      const messageData = readObject(message);
-
-      const slotName = readEquipmentSlotName(messageData.slot);
-
-      if (!slotName) {
-        return;
-      }
-
-      const equipmentData =
-        messageData.item ??
-        messageData.equipment ??
-        messageData.value ??
-        messageData;
-
-      const targetSlot = getEquipmentSlot(player, slotName);
-
-      if (!applyEquipmentSlot(targetSlot, equipmentData)) {
-        return;
-      }
-
-      console.log(`Equipment updated: ${client.sessionId}`, {
-        slot: slotName,
-        id: targetSlot.id,
-        type: targetSlot.type,
-        sub_type: targetSlot.sub_type,
-      });
+    set_equipment: async (client: Client, message: SetEquipmentMessage) => {
+      await this.handleSetEquipmentRequest(client, message);
     },
 
-    drop_item: (client: Client, message?: DropItemMessage) => {
-      this.handleDropItemRequest(client, message);
+    drop_item: async (client: Client, message?: DropItemMessage) => {
+      await this.handleDropItemRequest(client, message);
     },
 
-    collect_item: (client: Client, message?: CollectItemMessage) => {
-      this.handleCollectItemRequest(client, message);
+    collect_item: async (client: Client, message?: CollectItemMessage) => {
+      await this.handleCollectItemRequest(client, message);
+    },
+
+    set_inventory_order: async (
+      client: Client,
+      message?: SetInventoryOrderMessage,
+    ) => {
+      await this.handleSetInventoryOrderRequest(client, message);
+    },
+
+    set_max_health: async (client: Client, message?: SetMaxHealthMessage) => {
+      await this.handleSetMaxHealthRequest(client, message);
     },
   };
 
   onCreate() {
-    for (const spawn of MONSTER_SPAWNS) {
-      this.spawnMonster(spawn, "initial");
-    }
+    this.initializeMonsterSpawnRegions();
 
     let elapsedTime = 0;
 
@@ -928,7 +1290,578 @@ export class MyRoom extends Room<{
     };
   }
 
-  private handleDropItemRequest(
+  private readPlayerInventory(player: PlayerState): InventorySlotData[] {
+    return Array.from(player.inventory).map((slot) => ({
+      id: slot.id,
+      type: slot.type,
+      sub_type: slot.sub_type,
+      quantity: slot.quantity,
+    }));
+  }
+
+  private restorePlayerInventory(
+    player: PlayerState,
+    inventory: InventorySlotData[],
+  ) {
+    player.inventory.clear();
+
+    for (const slotData of inventory) {
+      const slot = new PlayerInventorySlotState();
+      slot.id = slotData.id;
+      slot.type = slotData.type;
+      slot.sub_type = slotData.sub_type;
+      slot.quantity = slotData.quantity;
+      player.inventory.push(slot);
+    }
+  }
+
+  private async persistPlayerInventory(
+    client: Client,
+    player: PlayerState,
+  ) {
+    const identity = this.playerIdentities.get(client.sessionId);
+
+    if (!identity) {
+      throw new Error("PLAYER_IDENTITY_MISSING");
+    }
+
+    await firebaseAdminFirestore
+      .collection("users")
+      .doc(identity.playerUid)
+      .collection("characters")
+      .doc(identity.characterId)
+      .update({
+        Inventory: this.readPlayerInventory(player),
+      });
+  }
+
+  private readPlayerEquipment(
+    player: PlayerState,
+  ): Record<EquipmentSlotName, EquipmentSlotData> {
+    return {
+      Head: parseEquipmentSlot(player.equipment.Head) ?? createEmptyEquipmentSlotData(),
+      Tronco:
+        parseEquipmentSlot(player.equipment.Tronco) ?? createEmptyEquipmentSlotData(),
+      Legs: parseEquipmentSlot(player.equipment.Legs) ?? createEmptyEquipmentSlotData(),
+      Foots:
+        parseEquipmentSlot(player.equipment.Foots) ?? createEmptyEquipmentSlotData(),
+      Weapons:
+        parseEquipmentSlot(player.equipment.Weapons) ?? createEmptyEquipmentSlotData(),
+      OffHand:
+        parseEquipmentSlot(player.equipment.OffHand) ?? createEmptyEquipmentSlotData(),
+    };
+  }
+
+  private restorePlayerEquipment(
+    player: PlayerState,
+    equipment: Record<EquipmentSlotName, EquipmentSlotData>,
+  ) {
+    for (const slotName of Object.keys(equipment) as EquipmentSlotName[]) {
+      applyEquipmentSlot(getEquipmentSlot(player, slotName), equipment[slotName]);
+    }
+  }
+
+  private async persistPlayerInventoryAndEquipment(
+    client: Client,
+    player: PlayerState,
+  ) {
+    const identity = this.playerIdentities.get(client.sessionId);
+
+    if (!identity) {
+      throw new Error("PLAYER_IDENTITY_MISSING");
+    }
+
+    await firebaseAdminFirestore
+      .collection("users")
+      .doc(identity.playerUid)
+      .collection("characters")
+      .doc(identity.characterId)
+      .update({
+        Inventory: this.readPlayerInventory(player),
+        Equipment: this.readPlayerEquipment(player),
+      });
+  }
+
+  private async handleSetEquipmentRequest(
+    client: Client,
+    message: SetEquipmentMessage,
+  ) {
+    const player = this.state.players.get(client.sessionId);
+    const messageData = readObject(message);
+    const requestId = readSafeStringFromAliases(
+      [messageData.requestId, messageData.RequestID],
+      MAX_ITEM_REQUEST_ID_LENGTH,
+    );
+    const slotName = readEquipmentSlotName(messageData.slot);
+
+    if (!player || !slotName) {
+      client.send("set_equipment_result", {
+        code: "INVALID_REQUEST",
+        ok: false,
+        requestId,
+      });
+      return;
+    }
+
+    if (this.playerInventoryOperations.has(client.sessionId)) {
+      client.send("set_equipment_result", {
+        code: "INVENTORY_BUSY",
+        ok: false,
+        requestId,
+        slot: slotName,
+      });
+      return;
+    }
+
+    const equipmentData =
+      messageData.item ??
+      messageData.equipment ??
+      messageData.value ??
+      messageData;
+    const requestedEquipment = parseEquipmentSlot(equipmentData);
+
+    if (!requestedEquipment) {
+      client.send("set_equipment_result", {
+        code: "INVALID_EQUIPMENT",
+        ok: false,
+        requestId,
+        slot: slotName,
+      });
+      return;
+    }
+
+    const currentSlot = getEquipmentSlot(player, slotName);
+    const currentEquipment =
+      parseEquipmentSlot(currentSlot) ?? createEmptyEquipmentSlotData();
+
+    if (currentEquipment.id === requestedEquipment.id) {
+      client.send("set_equipment_result", {
+        code: "NO_CHANGE",
+        equipment: currentEquipment,
+        ok: true,
+        requestId,
+        slot: slotName,
+      });
+      return;
+    }
+
+    const requestedDefinition =
+      requestedEquipment.id === "empty"
+        ? undefined
+        : getItemDefinition(requestedEquipment.id);
+
+    if (
+      requestedEquipment.id !== "empty" &&
+      (!requestedDefinition || requestedDefinition.type !== slotName)
+    ) {
+      client.send("set_equipment_result", {
+        code: "WRONG_EQUIPMENT_SLOT",
+        ok: false,
+        requestId,
+        slot: slotName,
+      });
+      return;
+    }
+
+    this.playerInventoryOperations.add(client.sessionId);
+    const inventoryBefore = this.readPlayerInventory(player);
+    const equipmentBefore = this.readPlayerEquipment(player);
+
+    if (
+      requestedEquipment.id !== "empty" &&
+      !this.removeInventoryItem(player, requestedEquipment.id, 1)
+    ) {
+      this.playerInventoryOperations.delete(client.sessionId);
+      client.send("set_equipment_result", {
+        code: "ITEM_NOT_IN_INVENTORY",
+        ok: false,
+        requestId,
+        slot: slotName,
+      });
+      return;
+    }
+
+    if (
+      currentEquipment.id !== "empty" &&
+      !this.addInventoryItem(player, currentEquipment.id, 1)
+    ) {
+      this.restorePlayerInventory(player, inventoryBefore);
+      this.playerInventoryOperations.delete(client.sessionId);
+      client.send("set_equipment_result", {
+        code: "INVENTORY_FULL",
+        ok: false,
+        requestId,
+        slot: slotName,
+      });
+      return;
+    }
+
+    applyEquipmentSlot(
+      currentSlot,
+      requestedEquipment.id === "empty"
+        ? createEmptyEquipmentSlotData()
+        : {
+            id: requestedEquipment.id,
+            type: requestedDefinition!.type,
+            sub_type: requestedDefinition!.subType,
+          },
+    );
+
+    try {
+      await this.persistPlayerInventoryAndEquipment(client, player);
+    } catch (error) {
+      this.restorePlayerInventory(player, inventoryBefore);
+      this.restorePlayerEquipment(player, equipmentBefore);
+      this.playerInventoryOperations.delete(client.sessionId);
+
+      client.send("set_equipment_result", {
+        code: "EQUIPMENT_SAVE_FAILED",
+        ok: false,
+        requestId,
+        slot: slotName,
+      });
+
+      console.error("[Grandoria] Equipment save failed:", error);
+      return;
+    }
+
+    this.playerInventoryOperations.delete(client.sessionId);
+
+    const savedEquipment =
+      parseEquipmentSlot(currentSlot) ?? createEmptyEquipmentSlotData();
+
+    client.send("set_equipment_result", {
+      code: "EQUIPMENT_UPDATED",
+      equipment: savedEquipment,
+      inventory: this.readPlayerInventory(player),
+      ok: true,
+      requestId,
+      slot: slotName,
+    });
+
+    console.log(`[Grandoria] Equipment updated and persisted: ${client.sessionId}`, {
+      slot: slotName,
+      id: savedEquipment.id,
+      type: savedEquipment.type,
+      sub_type: savedEquipment.sub_type,
+    });
+  }
+
+  private removeInventoryItem(
+    player: PlayerState,
+    itemID: string,
+    quantity: number,
+  ): boolean {
+    const availableQuantity = Array.from(player.inventory)
+      .filter((slot) => slot.id === itemID)
+      .reduce((total, slot) => total + Math.max(0, slot.quantity), 0);
+
+    if (availableQuantity < quantity) {
+      return false;
+    }
+
+    let remaining = quantity;
+
+    for (const slot of player.inventory) {
+      if (slot.id !== itemID || remaining <= 0) {
+        continue;
+      }
+
+      const removed = Math.min(slot.quantity, remaining);
+      slot.quantity -= removed;
+      remaining -= removed;
+
+      if (slot.quantity <= 0) {
+        slot.id = "empty";
+        slot.type = "0";
+        slot.sub_type = "0";
+        slot.quantity = 0;
+      }
+    }
+
+    return remaining === 0;
+  }
+
+  private addInventoryItem(
+    player: PlayerState,
+    itemID: string,
+    quantity: number,
+  ): boolean {
+    const definition = getItemDefinition(itemID);
+
+    if (!definition) {
+      return false;
+    }
+
+    let remaining = quantity;
+
+    for (const slot of player.inventory) {
+      if (slot.id !== itemID || slot.quantity >= definition.maxStack) {
+        continue;
+      }
+
+      const added = Math.min(definition.maxStack - slot.quantity, remaining);
+      slot.quantity += added;
+      remaining -= added;
+
+      if (remaining === 0) {
+        return true;
+      }
+    }
+
+    for (const slot of player.inventory) {
+      if (slot.id !== "empty" && slot.id !== "0" && slot.id !== "") {
+        continue;
+      }
+
+      const added = Math.min(definition.maxStack, remaining);
+      slot.id = itemID;
+      slot.type = definition.type;
+      slot.sub_type = definition.subType;
+      slot.quantity = added;
+      remaining -= added;
+
+      if (remaining === 0) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private createInventoryTotals(
+    inventory: InventorySlotData[],
+  ): Map<string, number> {
+    const totals = new Map<string, number>();
+
+    for (const slot of inventory) {
+      if (slot.id === "empty" || slot.quantity <= 0) {
+        continue;
+      }
+
+      totals.set(slot.id, (totals.get(slot.id) ?? 0) + slot.quantity);
+    }
+
+    return totals;
+  }
+
+  private inventoryTotalsMatch(
+    first: InventorySlotData[],
+    second: InventorySlotData[],
+  ): boolean {
+    const firstTotals = this.createInventoryTotals(first);
+    const secondTotals = this.createInventoryTotals(second);
+
+    if (firstTotals.size !== secondTotals.size) {
+      return false;
+    }
+
+    for (const [itemID, quantity] of firstTotals) {
+      if (secondTotals.get(itemID) !== quantity) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  private async handleSetInventoryOrderRequest(
+    client: Client,
+    message?: SetInventoryOrderMessage,
+  ) {
+    const player = this.state.players.get(client.sessionId);
+    const messageData = readObject(message);
+    const requestId = readSafeStringFromAliases(
+      [messageData.requestId, messageData.RequestID],
+      MAX_ITEM_REQUEST_ID_LENGTH,
+    );
+
+    if (!player || !requestId) {
+      client.send("set_inventory_order_result", {
+        code: "INVALID_REQUEST",
+        ok: false,
+        requestId,
+      });
+      return;
+    }
+
+    if (this.playerInventoryOperations.has(client.sessionId)) {
+      client.send("set_inventory_order_result", {
+        code: "INVENTORY_BUSY",
+        inventory: this.readPlayerInventory(player),
+        ok: false,
+        requestId,
+      });
+      return;
+    }
+
+    const requestedInventory = readInventoryData(
+      messageData.inventory ?? messageData.Inventory,
+    );
+    const currentInventory = this.readPlayerInventory(player);
+
+    if (
+      requestedInventory.length !== currentInventory.length ||
+      !this.inventoryTotalsMatch(currentInventory, requestedInventory)
+    ) {
+      client.send("set_inventory_order_result", {
+        code: "INVENTORY_CONTENT_MISMATCH",
+        inventory: currentInventory,
+        ok: false,
+        requestId,
+      });
+      return;
+    }
+
+    for (const slot of requestedInventory) {
+      if (slot.id === "empty") {
+        continue;
+      }
+
+      const definition = getItemDefinition(slot.id);
+
+      if (!definition || slot.quantity > definition.maxStack) {
+        client.send("set_inventory_order_result", {
+          code: "INVALID_INVENTORY_SLOT",
+          inventory: currentInventory,
+          ok: false,
+          requestId,
+        });
+        return;
+      }
+
+      slot.type = definition.type;
+      slot.sub_type = definition.subType;
+    }
+
+    this.playerInventoryOperations.add(client.sessionId);
+    this.restorePlayerInventory(player, requestedInventory);
+
+    try {
+      await this.persistPlayerInventory(client, player);
+    } catch (error) {
+      this.restorePlayerInventory(player, currentInventory);
+      this.playerInventoryOperations.delete(client.sessionId);
+
+      client.send("set_inventory_order_result", {
+        code: "INVENTORY_SAVE_FAILED",
+        inventory: currentInventory,
+        ok: false,
+        requestId,
+      });
+
+      console.error("[Grandoria] Inventory order save failed:", error);
+      return;
+    }
+
+    this.playerInventoryOperations.delete(client.sessionId);
+
+    client.send("set_inventory_order_result", {
+      code: "INVENTORY_ORDER_UPDATED",
+      inventory: this.readPlayerInventory(player),
+      ok: true,
+      requestId,
+    });
+
+    console.log(`[Grandoria] Inventory order persisted: ${client.sessionId}`, {
+      requestId,
+    });
+  }
+
+  private async handleSetMaxHealthRequest(
+    client: Client,
+    message?: SetMaxHealthMessage,
+  ) {
+    const player = this.state.players.get(client.sessionId);
+    const identity = this.playerIdentities.get(client.sessionId);
+    const messageData = readObject(message);
+    const requestId = readSafeStringFromAliases(
+      [messageData.requestId, messageData.RequestID],
+      MAX_ITEM_REQUEST_ID_LENGTH,
+    );
+    const requestedMaxHealth = Math.trunc(
+      readFiniteNumberFromAliases(
+        [messageData.maxHealth, messageData.MaxHP],
+        Number.NaN,
+      ),
+    );
+
+    if (
+      !player ||
+      !identity ||
+      !requestId ||
+      !Number.isFinite(requestedMaxHealth) ||
+      requestedMaxHealth < 1 ||
+      requestedMaxHealth > 1_000_000
+    ) {
+      client.send("set_max_health_result", {
+        code: "INVALID_MAX_HEALTH",
+        ok: false,
+        requestId,
+      });
+      return;
+    }
+
+    if (requestedMaxHealth === player.maxHealth) {
+      client.send("set_max_health_result", {
+        code: "NO_CHANGE",
+        currentHealth: player.currentHealth,
+        maxHealth: player.maxHealth,
+        ok: true,
+        requestId,
+      });
+      return;
+    }
+
+    const previousMaxHealth = player.maxHealth;
+    const previousCurrentHealth = player.currentHealth;
+    player.maxHealth = requestedMaxHealth;
+    player.currentHealth = Math.min(player.currentHealth, player.maxHealth);
+    player.isAlive = player.currentHealth > 0;
+
+    try {
+      await firebaseAdminFirestore
+        .collection("users")
+        .doc(identity.playerUid)
+        .collection("characters")
+        .doc(identity.characterId)
+        .update({
+          "Resources.MaxHP": player.maxHealth,
+          "Resources.CurrentHP": player.currentHealth,
+        });
+    } catch (error) {
+      player.maxHealth = previousMaxHealth;
+      player.currentHealth = previousCurrentHealth;
+      player.isAlive = player.currentHealth > 0;
+
+      client.send("set_max_health_result", {
+        code: "MAX_HEALTH_SAVE_FAILED",
+        currentHealth: player.currentHealth,
+        maxHealth: player.maxHealth,
+        ok: false,
+        requestId,
+      });
+
+      console.error("[Grandoria] Max health save failed:", error);
+      return;
+    }
+
+    client.send("set_max_health_result", {
+      code: "MAX_HEALTH_UPDATED",
+      currentHealth: player.currentHealth,
+      maxHealth: player.maxHealth,
+      ok: true,
+      requestId,
+    });
+
+    console.log(`[Grandoria] Max health updated: ${client.sessionId}`, {
+      currentHealth: player.currentHealth,
+      maxHealth: player.maxHealth,
+      requestId,
+    });
+  }
+
+  private async handleDropItemRequest(
     client: Client,
     message?: DropItemMessage,
   ) {
@@ -991,6 +1924,28 @@ export class MyRoom extends Room<{
       return;
     }
 
+    if (this.playerInventoryOperations.has(client.sessionId)) {
+      client.send("drop_item_result", {
+        code: "INVENTORY_BUSY",
+        ok: false,
+        requestId,
+      });
+      return;
+    }
+
+    this.playerInventoryOperations.add(client.sessionId);
+    const inventoryBefore = this.readPlayerInventory(player);
+
+    if (!this.removeInventoryItem(player, itemID, quantity)) {
+      this.playerInventoryOperations.delete(client.sessionId);
+      client.send("drop_item_result", {
+        code: "INSUFFICIENT_INVENTORY",
+        ok: false,
+        requestId,
+      });
+      return;
+    }
+
     const identity = this.playerIdentities.get(client.sessionId);
     const createdBy = identity?.playerUid || client.sessionId;
     const sharedItemIDs: string[] = [];
@@ -1016,6 +1971,9 @@ export class MyRoom extends Room<{
         this.state.items.delete(sharedItemID);
       }
 
+      this.restorePlayerInventory(player, inventoryBefore);
+      this.playerInventoryOperations.delete(client.sessionId);
+
       client.send("drop_item_result", {
         code: "DROP_CREATION_FAILED",
         ok: false,
@@ -1023,6 +1981,28 @@ export class MyRoom extends Room<{
       });
       return;
     }
+
+    try {
+      await this.persistPlayerInventory(client, player);
+    } catch (error) {
+      for (const sharedItemID of sharedItemIDs) {
+        this.state.items.delete(sharedItemID);
+      }
+
+      this.restorePlayerInventory(player, inventoryBefore);
+      this.playerInventoryOperations.delete(client.sessionId);
+
+      client.send("drop_item_result", {
+        code: "INVENTORY_SAVE_FAILED",
+        ok: false,
+        requestId,
+      });
+
+      console.error("[Grandoria] Inventory drop save failed:", error);
+      return;
+    }
+
+    this.playerInventoryOperations.delete(client.sessionId);
 
     const result: Record<string, unknown> = {
       code: "DROP_CREATED",
@@ -1061,10 +2041,11 @@ export class MyRoom extends Room<{
       requestId,
       sessionId: client.sessionId,
       sharedItemIDs,
+      inventoryPersisted: true,
     });
   }
 
-  private handleCollectItemRequest(
+  private async handleCollectItemRequest(
     client: Client,
     message?: CollectItemMessage,
   ) {
@@ -1140,6 +2121,51 @@ export class MyRoom extends Room<{
       return;
     }
 
+    if (this.playerInventoryOperations.has(client.sessionId)) {
+      client.send("collect_item_result", {
+        code: "INVENTORY_BUSY",
+        ok: false,
+        requestId,
+        sharedItemID,
+      });
+      return;
+    }
+
+    this.playerInventoryOperations.add(client.sessionId);
+    const inventoryBefore = this.readPlayerInventory(player);
+
+    if (!this.addInventoryItem(player, item.itemID, item.quantity)) {
+      this.restorePlayerInventory(player, inventoryBefore);
+      this.playerInventoryOperations.delete(client.sessionId);
+
+      client.send("collect_item_result", {
+        code: "INVENTORY_FULL",
+        ok: false,
+        requestId,
+        sharedItemID,
+      });
+      return;
+    }
+
+    try {
+      await this.persistPlayerInventory(client, player);
+    } catch (error) {
+      this.restorePlayerInventory(player, inventoryBefore);
+      this.playerInventoryOperations.delete(client.sessionId);
+
+      client.send("collect_item_result", {
+        code: "INVENTORY_SAVE_FAILED",
+        ok: false,
+        requestId,
+        sharedItemID,
+      });
+
+      console.error("[Grandoria] Shared item collect save failed:", error);
+      return;
+    }
+
+    this.playerInventoryOperations.delete(client.sessionId);
+
     const result = {
       code: "ITEM_COLLECTED",
       itemID: item.itemID,
@@ -1160,6 +2186,7 @@ export class MyRoom extends Room<{
       requestId,
       sessionId: client.sessionId,
       sharedItemID,
+      inventoryPersisted: true,
     });
   }
 
@@ -1256,6 +2283,45 @@ export class MyRoom extends Room<{
       monsterType: monster.monsterType,
       rarity: selectedDrop.rarity,
       sharedItemID,
+    });
+  }
+
+  private awardMonsterExperience(
+    killerSessionId: string,
+    monsterId: string,
+    monsterType: string,
+    amount: number,
+  ) {
+    const safeAmount = Math.max(0, Math.trunc(amount));
+
+    if (safeAmount === 0) {
+      return;
+    }
+
+    const killerClient = this.clients.find(
+      (client) => client.sessionId === killerSessionId,
+    );
+
+    if (!killerClient) {
+      console.warn("[Grandoria] XP reward skipped: killer disconnected.", {
+        killerSessionId,
+        monsterId,
+        monsterType,
+      });
+      return;
+    }
+
+    killerClient.send("xp_awarded", {
+      amount: safeAmount,
+      monsterId,
+      monsterType,
+    });
+
+    console.log("[Grandoria] Monster XP awarded:", {
+      amount: safeAmount,
+      killerSessionId,
+      monsterId,
+      monsterType,
     });
   }
 
@@ -1461,6 +2527,99 @@ export class MyRoom extends Room<{
     });
   }
 
+  private initializeMonsterSpawnRegions() {
+    const regions = getMonsterSpawnRegions("MAP_1");
+
+    for (const region of regions) {
+      if (!region.enabled || region.maxAlive <= 0) {
+        console.log("[Grandoria] Spawn region disabled or empty:", {
+          regionId: region.id,
+          enabled: region.enabled,
+          maxAlive: region.maxAlive,
+        });
+        continue;
+      }
+
+      const definition = getMonsterDefinition(region.mobType);
+
+      if (!definition) {
+        console.error("[Grandoria] Spawn region references unknown monster type:", {
+          regionId: region.id,
+          mobType: region.mobType,
+        });
+        continue;
+      }
+
+      for (let slotIndex = 0; slotIndex < region.maxAlive; slotIndex += 1) {
+        const monsterId = `${region.id}__${String(slotIndex + 1).padStart(3, "0")}`;
+
+        this.monsterRegionsByMonsterId.set(monsterId, region);
+
+        if (!this.spawnMonsterFromRegion(monsterId, "initial")) {
+          this.monsterRespawnRemaining.set(
+            monsterId,
+            MONSTER_SPAWN_RETRY_DELAY_MS,
+          );
+        }
+      }
+    }
+  }
+
+  private spawnMonsterFromRegion(
+    monsterId: string,
+    reason: "initial" | "respawn",
+  ): boolean {
+    const region = this.monsterRegionsByMonsterId.get(monsterId);
+
+    if (!region || !region.enabled) {
+      return false;
+    }
+
+    const definition = getMonsterDefinition(region.mobType);
+
+    if (!definition) {
+      console.error("[Grandoria] Monster spawn failed: unknown monster type.", {
+        monsterId,
+        regionId: region.id,
+        mobType: region.mobType,
+      });
+      return false;
+    }
+
+    const point = findMonsterSpawnPoint(
+      region.mapId,
+      definition.bodyProfileId,
+      region,
+      this.monsterRandom,
+    );
+
+    if (!point) {
+      console.error("[Grandoria] Monster spawn failed: no valid point in region.", {
+        monsterId,
+        regionId: region.id,
+        mobType: region.mobType,
+        bounds: region.bounds,
+        spawnPadding: region.spawnPadding,
+      });
+      return false;
+    }
+
+    const spawn: MonsterSpawn = {
+      monsterId,
+      monsterType: region.mobType as MonsterType,
+      mapId: region.mapId,
+      regionId: region.id,
+      x: point.x,
+      y: point.y,
+      direction: "down",
+    };
+
+    this.monsterSpawnsById.set(monsterId, spawn);
+    this.spawnMonster(spawn, reason);
+
+    return this.state.monsters.has(monsterId);
+  }
+
   private spawnMonster(spawn: MonsterSpawn, reason: "initial" | "respawn") {
     if (this.state.monsters.has(spawn.monsterId)) {
       return;
@@ -1498,6 +2657,7 @@ export class MyRoom extends Room<{
       monsterId: spawn.monsterId,
       monsterType: spawn.monsterType,
       mapId: spawn.mapId,
+      regionId: spawn.regionId,
       position: {
         x: spawn.x,
         y: spawn.y,
@@ -1539,24 +2699,25 @@ export class MyRoom extends Room<{
 
       this.state.monsters.delete(monsterId);
 
-      const spawn = MONSTER_SPAWNS_BY_ID.get(monsterId);
+      const region = this.monsterRegionsByMonsterId.get(monsterId);
 
-      if (!spawn) {
+      if (!region) {
         console.error(
-          "[Grandoria] Monster removed without a registered spawn:",
+          "[Grandoria] Monster removed without a registered spawn region:",
           { monsterId },
         );
 
         return;
       }
 
-      const definition = MONSTER_DEFINITIONS[spawn.monsterType];
+      const respawnDelayMs = Math.max(0, region.respawnSeconds * 1000);
 
-      this.monsterRespawnRemaining.set(monsterId, definition.respawnDelayMs);
+      this.monsterRespawnRemaining.set(monsterId, respawnDelayMs);
 
       console.log("[Grandoria] Monster removed after death animation:", {
         monsterId,
-        respawnDelayMs: definition.respawnDelayMs,
+        regionId: region.id,
+        respawnDelayMs,
       });
     });
 
@@ -1577,18 +2738,23 @@ export class MyRoom extends Room<{
 
       this.monsterRespawnRemaining.delete(monsterId);
 
-      const spawn = MONSTER_SPAWNS_BY_ID.get(monsterId);
+      const region = this.monsterRegionsByMonsterId.get(monsterId);
 
-      if (!spawn) {
-        console.error(
-          "[Grandoria] Respawn failed: spawn configuration not found.",
-          { monsterId },
+      if (!region || !region.enabled) {
+        console.warn(
+          "[Grandoria] Respawn skipped: spawn region is missing or disabled.",
+          { monsterId, regionId: region?.id ?? "" },
         );
 
         return;
       }
 
-      this.spawnMonster(spawn, "respawn");
+      if (!this.spawnMonsterFromRegion(monsterId, "respawn")) {
+        this.monsterRespawnRemaining.set(
+          monsterId,
+          MONSTER_SPAWN_RETRY_DELAY_MS,
+        );
+      }
     });
   }
 
@@ -2197,7 +3363,7 @@ export class MyRoom extends Room<{
         return;
       }
 
-      const spawn = MONSTER_SPAWNS_BY_ID.get(monsterId);
+      const spawn = this.monsterSpawnsById.get(monsterId);
       const definition = getMonsterDefinition(monster.monsterType);
 
       if (!spawn || !definition) {
@@ -2382,6 +3548,13 @@ export class MyRoom extends Room<{
 
       this.spawnMonsterDrop(monsterId, monster, sessionId);
 
+      this.awardMonsterExperience(
+        sessionId,
+        monsterId,
+        monster.monsterType,
+        monsterDefinition.xpReward,
+      );
+
       this.monsterHurtRemaining.delete(monsterId);
 
       this.monsterPatrolStates.delete(monsterId);
@@ -2392,11 +3565,7 @@ export class MyRoom extends Room<{
 
       this.monstersPendingRespawnIdleTick.delete(monsterId);
 
-      const spawn = MONSTER_SPAWNS_BY_ID.get(monsterId);
-
-      const deathDurationMs = spawn
-        ? MONSTER_DEFINITIONS[spawn.monsterType].deathDurationMs
-        : 480;
+      const deathDurationMs = monsterDefinition.deathDurationMs;
 
       this.monsterDeathRemaining.set(monsterId, deathDurationMs);
     } else {
@@ -2419,19 +3588,42 @@ export class MyRoom extends Room<{
     });
   }
 
-  onJoin(client: Client, options: JoinOptions) {
+    onJoin(client: Client, options: JoinOptions) {
     const joinOptions = options ?? {};
 
-    const identity: PlayerIdentity = {
-      playerUid: readSafeStringFromAliases(
-        [joinOptions.playerUid, joinOptions.PlayerUID],
-        128,
-      ),
+    const authenticatedPlayer =
+      client.auth as AuthenticatedPlayer | undefined;
 
-      characterId: readSafeStringFromAliases(
-        [joinOptions.characterId, joinOptions.CharacterID],
+    const authenticatedUid =
+      readSafeStringFromAliases(
+        [authenticatedPlayer?.uid],
         128,
-      ),
+      );
+
+    const authenticatedCharacterId =
+      readSafeStringFromAliases(
+        [authenticatedPlayer?.characterId],
+        128,
+      );
+
+    if (
+      authenticatedUid === "" ||
+      authenticatedCharacterId === ""
+    ) {
+      console.warn(
+        "[Grandoria] Join rejected: authenticated identity is missing.",
+      );
+
+      throw new ServerError(
+        ErrorCode.AUTH_FAILED,
+        "Authentication failed.",
+      );
+    }
+
+    const identity: PlayerIdentity = {
+      playerUid: authenticatedUid,
+
+      characterId: authenticatedCharacterId,
 
       mapId: readSafeStringFromAliases(
         [joinOptions.mapId, joinOptions.MapID],
@@ -2439,32 +3631,34 @@ export class MyRoom extends Room<{
       ),
     };
 
-    identity.mapId = normalizeWorldMapId(identity.mapId);
+    identity.mapId =
+  normalizeWorldMapId(
+    authenticatedPlayer.location.mapId,
+  );
 
     const appearanceOptions = readObject(
       joinOptions.appearance ?? joinOptions.Appearance,
     );
 
-    const equipmentOptions = readObject(
-      joinOptions.equipment ?? joinOptions.Equipment,
-    );
+    const equipmentOptions = authenticatedPlayer.equipment;
 
     const player = new PlayerState();
 
     const spawn = resolvePlayerSpawn(
-      identity.mapId,
-      readFiniteNumberFromAliases([joinOptions.x, joinOptions.X], Number.NaN),
-      readFiniteNumberFromAliases([joinOptions.y, joinOptions.Y], Number.NaN),
-    );
+  identity.mapId,
+  authenticatedPlayer.location.x,
+  authenticatedPlayer.location.y,
+);
+    
 
     player.x = spawn.x;
 
     player.y = spawn.y;
 
-    player.direction = readDirectionFromAliases([
-      joinOptions.direction,
-      joinOptions.Direction,
-    ]);
+    player.direction =
+  readDirectionFromAliases([
+    authenticatedPlayer.location.direction,
+  ]);
 
     player.animation = "idle";
 
@@ -2477,11 +3671,11 @@ export class MyRoom extends Room<{
 
     player.mapId = identity.mapId;
 
-    player.currentHealth = PLAYER_MAX_HEALTH;
+    player.currentHealth = authenticatedPlayer.resources.currentHealth;
 
-    player.maxHealth = PLAYER_MAX_HEALTH;
+    player.maxHealth = authenticatedPlayer.resources.maxHealth;
 
-    player.isAlive = true;
+    player.isAlive = player.currentHealth > 0;
 
     player.appearance.Sex = readAppearanceValue(
       appearanceOptions.Sex ?? appearanceOptions.sex,
@@ -2563,6 +3757,17 @@ export class MyRoom extends Room<{
       ]),
     );
 
+    for (const inventorySlotData of authenticatedPlayer.inventory) {
+      const inventorySlot = new PlayerInventorySlotState();
+
+      inventorySlot.id = inventorySlotData.id;
+      inventorySlot.type = inventorySlotData.type;
+      inventorySlot.sub_type = inventorySlotData.sub_type;
+      inventorySlot.quantity = inventorySlotData.quantity;
+
+      player.inventory.push(inventorySlot);
+    }
+
     this.playerIdentities.set(client.sessionId, identity);
 
     this.state.players.set(client.sessionId, player);
@@ -2616,35 +3821,115 @@ export class MyRoom extends Room<{
     );
   }
 
-  onLeave(client: Client, code: CloseCode) {
-    this.playerInputs.delete(client.sessionId);
+  async onLeave(
+  client: Client,
+  code: CloseCode,
+) {
+  const player =
+    this.state.players.get(client.sessionId);
 
-    this.playerCollisionBlocks.delete(client.sessionId);
+  const identity =
+    this.playerIdentities.get(client.sessionId);
 
-    this.playerIdentities.delete(client.sessionId);
+  this.playerInputs.delete(client.sessionId);
+  this.playerCollisionBlocks.delete(client.sessionId);
+  this.playerIdentities.delete(client.sessionId);
+  this.playerAttackRemaining.delete(client.sessionId);
+  this.playerAttackTargets.delete(client.sessionId);
+  this.playerRespawnRemaining.delete(client.sessionId);
+  this.completedDropRequests.delete(client.sessionId);
+  this.playerInventoryOperations.delete(client.sessionId);
 
-    this.playerAttackRemaining.delete(client.sessionId);
+  this.state.players.delete(client.sessionId);
 
-    this.playerAttackTargets.delete(client.sessionId);
-
-    this.playerRespawnRemaining.delete(client.sessionId);
-
-    this.completedDropRequests.delete(client.sessionId);
-
-    this.state.players.delete(client.sessionId);
-
-    this.monsterAttackStates.forEach((attackState, monsterId) => {
-      if (attackState.targetSessionId === client.sessionId) {
+  this.monsterAttackStates.forEach(
+    (attackState, monsterId) => {
+      if (
+        attackState.targetSessionId ===
+        client.sessionId
+      ) {
         this.monsterAttackStates.delete(monsterId);
       }
-    });
+    },
+  );
 
-    console.log(
-      `[Grandoria] Player ${client.sessionId} left.`,
-      `Code: ${code}.`,
-      `Total: ${this.state.players.size}`,
+  if (player && identity) {
+    try {
+      await firebaseAdminFirestore
+        .collection("users")
+        .doc(identity.playerUid)
+        .collection("characters")
+        .doc(identity.characterId)
+        .update({
+          "Location.Map":
+            normalizeWorldMapId(player.mapId),
+
+          "Location.X":
+            player.x,
+
+          "Location.Y":
+            player.y,
+
+          "Location.Direction":
+            readDirectionFromAliases([
+              player.direction,
+            ]),
+
+          "Resources.CurrentHP":
+            Math.max(0, Math.min(player.currentHealth, player.maxHealth)),
+        });
+
+      console.log(
+        `[Grandoria] Player location saved: ${client.sessionId}.`,
+        {
+          characterId:
+            identity.characterId,
+
+          mapId:
+            normalizeWorldMapId(player.mapId),
+
+          x:
+            player.x,
+
+          y:
+            player.y,
+
+          direction:
+            player.direction,
+
+          currentHealth:
+            player.currentHealth,
+
+          maxHealth:
+            player.maxHealth,
+        },
+      );
+    } catch (error) {
+      const errorCode =
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        typeof error.code === "string"
+          ? error.code
+          : "unknown";
+
+      console.error(
+        `[Grandoria] Failed to save player location: ${client.sessionId}.`,
+        errorCode,
+      );
+    }
+  } else {
+    console.warn(
+      `[Grandoria] Player location was not saved because session data is missing: ${client.sessionId}.`,
     );
   }
+
+  console.log(
+    `[Grandoria] Player ${client.sessionId} left.`,
+    `Code: ${code}.`,
+    `Total: ${this.state.players.size}`,
+  );
+}
 
   onDispose() {
     this.playerInputs.clear();
@@ -2662,6 +3947,8 @@ export class MyRoom extends Room<{
     this.monsterAttackStates.clear();
     this.monsterAttackCooldownRemaining.clear();
     this.monstersPendingRespawnIdleTick.clear();
+    this.monsterSpawnsById.clear();
+    this.monsterRegionsByMonsterId.clear();
 
     console.log(`[Grandoria] Room ${this.roomId} disposed.`);
   }
