@@ -135,6 +135,18 @@ export class MonsterState extends Schema {
 
   @type("boolean")
   isAlive: boolean = true;
+
+  @type("number")
+  hitboxMinX: number = 0;
+
+  @type("number")
+  hitboxMaxX: number = 0;
+
+  @type("number")
+  hitboxMinY: number = 0;
+
+  @type("number")
+  hitboxMaxY: number = 0;
 }
 
 export class WorldItemState extends Schema {

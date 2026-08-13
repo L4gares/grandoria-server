@@ -170,7 +170,6 @@
     },
     {
       "aliases": [
-        "Remote_mob_boar",
         "mob_boar"
       ],
       "id": "mob_boar",
@@ -229,18 +228,17 @@
         "type": "polygon_set"
       },
       "verification": {
-        "baselineFrameCountPerSource": 116,
+        "baselineFrameCount": 116,
+        "changedAttackMaskCount": 4,
         "sourceObjects": [
-          "Remote_mob_boar",
           "mob_boar"
         ],
-        "stableMovementBodyDecision": "verified_baseline_rectangle",
-        "verifiedFrameCountPerSource": 120
+        "stableMovementBodyDecision": "dominant_baseline_with_attack_only_variants",
+        "verifiedFrameCount": 120
       }
     },
     {
       "aliases": [
-        "Remote_mob_hare",
         "mob_hare"
       ],
       "id": "mob_hare",
@@ -299,12 +297,13 @@
         "type": "polygon_set"
       },
       "verification": {
+        "baselineFrameCount": 100,
+        "changedAttackMaskCount": 0,
         "sourceObjects": [
-          "Remote_mob_hare",
           "mob_hare"
         ],
-        "stableAcrossAllFrames": true,
-        "verifiedFrameCountPerSource": 100
+        "stableMovementBodyDecision": "stable_across_all_frames",
+        "verifiedFrameCount": 100
       }
     }
   ],
@@ -11829,11 +11828,12 @@
     }
   ],
   "combatGeometry": {
-    "boarAttackMasks": [
+    "monsterAttackMasks": [
       {
         "direction": "down",
         "frameIndex": 3,
-        "id": "mob_boar:attack:down",
+        "id": "mob_boar:attack:down:3",
+        "monsterType": "mob_boar",
         "originRelativePolygons": [
           [
             {
@@ -11937,14 +11937,14 @@
           ]
         ],
         "verifiedAliases": [
-          "Remote_mob_boar",
           "mob_boar"
         ]
       },
       {
         "direction": "left",
         "frameIndex": 3,
-        "id": "mob_boar:attack:left",
+        "id": "mob_boar:attack:left:3",
+        "monsterType": "mob_boar",
         "originRelativePolygons": [
           [
             {
@@ -12024,14 +12024,14 @@
           ]
         ],
         "verifiedAliases": [
-          "Remote_mob_boar",
           "mob_boar"
         ]
       },
       {
         "direction": "right",
         "frameIndex": 3,
-        "id": "mob_boar:attack:right",
+        "id": "mob_boar:attack:right:3",
+        "monsterType": "mob_boar",
         "originRelativePolygons": [
           [
             {
@@ -12087,14 +12087,14 @@
           ]
         ],
         "verifiedAliases": [
-          "Remote_mob_boar",
           "mob_boar"
         ]
       },
       {
         "direction": "up",
         "frameIndex": 3,
-        "id": "mob_boar:attack:up",
+        "id": "mob_boar:attack:up:3",
+        "monsterType": "mob_boar",
         "originRelativePolygons": [
           [
             {
@@ -12158,7 +12158,6 @@
           ]
         ],
         "verifiedAliases": [
-          "Remote_mob_boar",
           "mob_boar"
         ]
       }
@@ -13382,8 +13381,8 @@
   "source": {
     "project": {
       "file": "RPG-2D-project-Grandoria-Colyseus-authoritative-inventory-equipment.json",
-      "sha256": "41e78a1be54e76192615316235199ec8b997eeb1bf9a3b0839dd3ec0cccbbb9f",
-      "sizeBytes": 6135194
+      "sha256": "b31015e733440130cf0dc89ed94f1cf26c93b0afe7b3fe51932ef7d0d41c48ce",
+      "sizeBytes": 5811368
     },
     "resources": [
       {

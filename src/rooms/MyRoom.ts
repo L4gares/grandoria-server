@@ -23,8 +23,15 @@ import {
 
 import {
   getItemDefinition,
-  getMonsterDropDefinition,
 } from "../items/ItemCatalog.js";
+
+import {
+  getMonsterDefinition,
+  type MonsterAttackDefinition,
+  type MonsterDefinition,
+  type MonsterDropDefinition,
+  type MonsterType,
+} from "../config/MonsterCatalog.js";
 
 import {
   findMonsterSpawnPoint,
@@ -178,85 +185,6 @@ type Hitbox = {
   maxY: number;
 };
 
-type HitboxOffsets = Hitbox;
-
-type MonsterAttackDefinition = {
-  damage: number;
-  range: number;
-  hitDelayMs: number;
-  durationMs: number;
-  intervalMs: number;
-};
-
-type MonsterDefinition = {
-  bodyProfileId: string;
-  maxHealth: number;
-  movementSpeed: number;
-  reactionSpeed: number;
-  patrolRadius: number;
-  reactionMode: "flee" | "chase";
-  detectionRadius: number;
-  disengageRadius: number;
-  targetStopDistance: number;
-  hurtDurationMs: number;
-  deathDurationMs: number;
-  xpReward: number;
-  hitboxOffsets: HitboxOffsets;
-  attack?: MonsterAttackDefinition;
-};
-
-const MONSTER_DEFINITIONS = {
-  mob_hare: {
-    bodyProfileId: "mob_hare",
-    maxHealth: 2,
-    movementSpeed: 25,
-    reactionSpeed: 45,
-    patrolRadius: 96,
-    reactionMode: "flee",
-    detectionRadius: 128,
-    disengageRadius: 192,
-    targetStopDistance: 0,
-    hurtDurationMs: 320,
-    deathDurationMs: 480,
-    xpReward: 20,
-    hitboxOffsets: {
-      minX: -6.5,
-      maxX: 7,
-      minY: -9.5,
-      maxY: 2.5,
-    },
-  },
-  mob_boar: {
-    bodyProfileId: "mob_boar",
-    maxHealth: 10,
-    movementSpeed: 15,
-    reactionSpeed: 50,
-    patrolRadius: 96,
-    reactionMode: "chase",
-    detectionRadius: 128,
-    disengageRadius: 192,
-    targetStopDistance: 16,
-    hurtDurationMs: 320,
-    deathDurationMs: 480,
-    xpReward: 50,
-    hitboxOffsets: {
-      minX: -6.5,
-      maxX: 5.5,
-      minY: -15,
-      maxY: -3.5,
-    },
-    attack: {
-      damage: 7,
-      range: 32,
-      hitDelayMs: 240,
-      durationMs: 400,
-      intervalMs: 2_000,
-    },
-  },
-} satisfies Record<string, MonsterDefinition>;
-
-type MonsterType = keyof typeof MONSTER_DEFINITIONS;
-
 type MonsterDirection = "up" | "down" | "left" | "right";
 
 type MonsterPatrolState = {
@@ -289,6 +217,7 @@ type CreateWorldItemOptions = {
   mapId: string;
   monsterId?: string;
   monsterType?: string;
+  quantity?: number;
   rarity?: string;
   source: "inventory_drop" | "mob_drop";
   x: number;
@@ -297,18 +226,9 @@ type CreateWorldItemOptions = {
 
 type SelectedMonsterDrop = {
   itemID: string;
+  quantity: number;
   rarity: string;
 };
-
-function getMonsterDefinition(
-  monsterType: string,
-): MonsterDefinition | undefined {
-  if (!Object.prototype.hasOwnProperty.call(MONSTER_DEFINITIONS, monsterType)) {
-    return undefined;
-  }
-
-  return MONSTER_DEFINITIONS[monsterType as MonsterType];
-}
 
 type MonsterSpawn = {
   monsterId: string;
@@ -333,6 +253,11 @@ const ITEM_COLLECTION_DISTANCE = 48;
 const ITEM_DROP_OFFSET_X = 25;
 const ITEM_DROP_OFFSET_Y = 16;
 const ITEM_DROP_POSITION_ATTEMPTS = 8;
+const MONSTER_DROP_SPACING = 18;
+const MONSTER_DROP_MIN_RADIUS = 10;
+const MONSTER_DROP_MAX_RADIUS = 36;
+const MONSTER_DROP_POSITION_ATTEMPTS = 32;
+const MONSTER_DROP_FALLBACK_MAX_RING = 4;
 const MAX_ITEM_REQUEST_ID_LENGTH = 128;
 const FIXED_TIME_STEP = 1000 / 60;
 const MONSTER_PATROL_MIN_DURATION_MS = 2_000;
@@ -1208,8 +1133,13 @@ if (
 
   private createWorldItem(options: CreateWorldItemOptions): string | null {
     const definition = getItemDefinition(options.itemID);
+    const quantity = options.quantity ?? 1;
 
-    if (!definition) {
+    if (
+      !definition ||
+      !Number.isInteger(quantity) ||
+      quantity <= 0
+    ) {
       return null;
     }
 
@@ -1232,7 +1162,7 @@ if (
     item.itemID = options.itemID;
     item.type = definition.type;
     item.subType = definition.subType;
-    item.quantity = 1;
+    item.quantity = quantity;
     item.x = Math.round(options.x);
     item.y = Math.round(options.y);
     item.zOrder = 300;
@@ -2190,13 +2120,26 @@ if (
     });
   }
 
-  private selectMonsterDrop(monsterType: string): SelectedMonsterDrop | null {
-    const definition = getMonsterDropDefinition(monsterType);
-
-    if (!definition) {
-      return null;
+  private rollMonsterDropQuantity(
+    minQuantity: number,
+    maxQuantity: number,
+  ): number {
+    if (maxQuantity <= minQuantity) {
+      return minQuantity;
     }
 
+    const range = maxQuantity - minQuantity + 1;
+    const offset = Math.min(
+      range - 1,
+      Math.floor(clampUnitInterval(this.worldItemRandom()) * range),
+    );
+
+    return minQuantity + offset;
+  }
+
+  private selectMonsterDrop(
+    definition: MonsterDropDefinition,
+  ): SelectedMonsterDrop | null {
     const dropRoll =
       Math.min(99, Math.floor(clampUnitInterval(this.worldItemRandom()) * 100)) +
       1;
@@ -2207,46 +2150,275 @@ if (
 
     const validRarities = definition.rarities
       .map((rarity) => ({
-        itemIDs: rarity.itemIDs.filter((itemID) => getItemDefinition(itemID)),
+        items: rarity.items.filter(
+          (item) =>
+            !item.guaranteed &&
+            item.weight > 0 &&
+            Boolean(getItemDefinition(item.itemID)),
+        ),
         name: rarity.name,
         weight: Math.max(0, rarity.weight),
       }))
-      .filter((rarity) => rarity.weight > 0 && rarity.itemIDs.length > 0);
-    const totalWeight = validRarities.reduce(
+      .filter((rarity) => rarity.weight > 0 && rarity.items.length > 0);
+    const totalRarityWeight = validRarities.reduce(
       (total, rarity) => total + rarity.weight,
       0,
     );
 
-    if (totalWeight <= 0) {
+    if (totalRarityWeight <= 0) {
       return null;
     }
 
     const rarityRoll =
-      clampUnitInterval(this.worldItemRandom()) * totalWeight;
-    let accumulatedWeight = 0;
+      clampUnitInterval(this.worldItemRandom()) * totalRarityWeight;
+    let accumulatedRarityWeight = 0;
     let selectedRarity = validRarities[validRarities.length - 1];
 
     for (const rarity of validRarities) {
-      accumulatedWeight += rarity.weight;
+      accumulatedRarityWeight += rarity.weight;
 
-      if (rarityRoll < accumulatedWeight) {
+      if (rarityRoll < accumulatedRarityWeight) {
         selectedRarity = rarity;
         break;
       }
     }
 
-    const itemIndex = Math.min(
-      selectedRarity.itemIDs.length - 1,
-      Math.floor(
-        clampUnitInterval(this.worldItemRandom()) *
-          selectedRarity.itemIDs.length,
-      ),
+    const totalItemWeight = selectedRarity.items.reduce(
+      (total, item) => total + item.weight,
+      0,
     );
 
+    if (totalItemWeight <= 0) {
+      return null;
+    }
+
+    const itemRoll =
+      clampUnitInterval(this.worldItemRandom()) * totalItemWeight;
+    let accumulatedItemWeight = 0;
+    let selectedItem =
+      selectedRarity.items[selectedRarity.items.length - 1];
+
+    for (const item of selectedRarity.items) {
+      accumulatedItemWeight += item.weight;
+
+      if (itemRoll < accumulatedItemWeight) {
+        selectedItem = item;
+        break;
+      }
+    }
+
     return {
-      itemID: selectedRarity.itemIDs[itemIndex],
+      itemID: selectedItem.itemID,
+      quantity: this.rollMonsterDropQuantity(
+        selectedItem.minQuantity,
+        selectedItem.maxQuantity,
+      ),
       rarity: selectedRarity.name,
     };
+  }
+
+  private isMonsterDropPositionAvailable(
+    mapId: string,
+    x: number,
+    y: number,
+  ): boolean {
+    let available = true;
+
+    this.state.items.forEach((item) => {
+      if (!available || item.mapId !== mapId) {
+        return;
+      }
+
+      if (Math.hypot(item.x - x, item.y - y) < MONSTER_DROP_SPACING) {
+        available = false;
+      }
+    });
+
+    return available;
+  }
+
+  private findMonsterDropPosition(monster: MonsterState): {
+    x: number;
+    y: number;
+  } {
+    const originX = Math.round(monster.x);
+    const originY = Math.round(monster.y);
+
+    /*
+     * Monster drops are scattered randomly around the death position.
+     * The server remains authoritative: every candidate is checked against
+     * world collision and against other world items before being accepted.
+     */
+    for (
+      let attempt = 0;
+      attempt < MONSTER_DROP_POSITION_ATTEMPTS;
+      attempt += 1
+    ) {
+      const angle =
+        clampUnitInterval(this.worldItemRandom()) * Math.PI * 2;
+      const radiusRandom =
+        clampUnitInterval(this.worldItemRandom());
+      const radius = Math.sqrt(
+        MONSTER_DROP_MIN_RADIUS * MONSTER_DROP_MIN_RADIUS +
+          radiusRandom *
+            (MONSTER_DROP_MAX_RADIUS * MONSTER_DROP_MAX_RADIUS -
+              MONSTER_DROP_MIN_RADIUS * MONSTER_DROP_MIN_RADIUS),
+      );
+      const candidateX = Math.round(
+        originX + Math.cos(angle) * radius,
+      );
+      const candidateY = Math.round(
+        originY + Math.sin(angle) * radius,
+      );
+      const resolved = resolvePlayerSpawn(
+        monster.mapId,
+        candidateX,
+        candidateY,
+      );
+
+      if (resolved.recovered) {
+        continue;
+      }
+
+      if (
+        !this.isMonsterDropPositionAvailable(
+          monster.mapId,
+          candidateX,
+          candidateY,
+        )
+      ) {
+        continue;
+      }
+
+      return {
+        x: candidateX,
+        y: candidateY,
+      };
+    }
+
+    /*
+     * Defensive fallback for crowded or highly obstructed areas.
+     * Candidate ring positions are shuffled, so even the fallback does not
+     * always place items in the same deterministic order.
+     */
+    const fallbackCandidates: Array<{ x: number; y: number }> = [];
+
+    for (let ring = 1; ring <= MONSTER_DROP_FALLBACK_MAX_RING; ring += 1) {
+      for (let gridY = -ring; gridY <= ring; gridY += 1) {
+        for (let gridX = -ring; gridX <= ring; gridX += 1) {
+          if (
+            Math.abs(gridX) !== ring &&
+            Math.abs(gridY) !== ring
+          ) {
+            continue;
+          }
+
+          fallbackCandidates.push({
+            x: originX + gridX * MONSTER_DROP_SPACING,
+            y: originY + gridY * MONSTER_DROP_SPACING,
+          });
+        }
+      }
+    }
+
+    for (
+      let index = fallbackCandidates.length - 1;
+      index > 0;
+      index -= 1
+    ) {
+      const swapIndex = Math.min(
+        index,
+        Math.floor(
+          clampUnitInterval(this.worldItemRandom()) * (index + 1),
+        ),
+      );
+      const temporary = fallbackCandidates[index];
+      fallbackCandidates[index] = fallbackCandidates[swapIndex];
+      fallbackCandidates[swapIndex] = temporary;
+    }
+
+    for (const candidate of fallbackCandidates) {
+      const resolved = resolvePlayerSpawn(
+        monster.mapId,
+        candidate.x,
+        candidate.y,
+      );
+
+      if (resolved.recovered) {
+        continue;
+      }
+
+      if (
+        !this.isMonsterDropPositionAvailable(
+          monster.mapId,
+          candidate.x,
+          candidate.y,
+        )
+      ) {
+        continue;
+      }
+
+      return candidate;
+    }
+
+    /*
+     * Extremely defensive last resort. This should only be reached if the
+     * nearby area is completely unavailable.
+     */
+    for (
+      let step = MONSTER_DROP_FALLBACK_MAX_RING + 1;
+      step <= 64;
+      step += 1
+    ) {
+      const candidateX = originX + step * MONSTER_DROP_SPACING;
+      const resolved = resolvePlayerSpawn(
+        monster.mapId,
+        candidateX,
+        originY,
+      );
+
+      if (
+        !resolved.recovered &&
+        this.isMonsterDropPositionAvailable(
+          monster.mapId,
+          candidateX,
+          originY,
+        )
+      ) {
+        return {
+          x: candidateX,
+          y: originY,
+        };
+      }
+    }
+
+    return {
+      x: originX,
+      y: originY,
+    };
+  }
+
+  private createMonsterDropWorldItem(
+    selectedDrop: SelectedMonsterDrop,
+    monsterId: string,
+    monster: MonsterState,
+    killerSessionId: string,
+  ): string | null {
+    const identity = this.playerIdentities.get(killerSessionId);
+    const position = this.findMonsterDropPosition(monster);
+
+    return this.createWorldItem({
+      createdBy: identity?.playerUid || killerSessionId,
+      itemID: selectedDrop.itemID,
+      mapId: monster.mapId,
+      monsterId,
+      monsterType: monster.monsterType,
+      quantity: selectedDrop.quantity,
+      rarity: selectedDrop.rarity,
+      source: "mob_drop",
+      x: position.x,
+      y: position.y,
+    });
   }
 
   private spawnMonsterDrop(
@@ -2254,36 +2426,60 @@ if (
     monster: MonsterState,
     killerSessionId: string,
   ) {
-    const selectedDrop = this.selectMonsterDrop(monster.monsterType);
+    const definition = getMonsterDefinition(monster.monsterType)?.drops;
 
-    if (!selectedDrop) {
+    if (!definition) {
       return;
     }
 
-    const identity = this.playerIdentities.get(killerSessionId);
-    const sharedItemID = this.createWorldItem({
-      createdBy: identity?.playerUid || killerSessionId,
-      itemID: selectedDrop.itemID,
-      mapId: monster.mapId,
-      monsterId,
-      monsterType: monster.monsterType,
-      rarity: selectedDrop.rarity,
-      source: "mob_drop",
-      x: monster.x,
-      y: monster.y,
-    });
+    const selectedDrops: SelectedMonsterDrop[] = [];
 
-    if (!sharedItemID) {
-      return;
+    for (const rarity of definition.rarities) {
+      for (const item of rarity.items) {
+        if (!item.guaranteed || !getItemDefinition(item.itemID)) {
+          continue;
+        }
+
+        selectedDrops.push({
+          itemID: item.itemID,
+          quantity: this.rollMonsterDropQuantity(
+            item.minQuantity,
+            item.maxQuantity,
+          ),
+          rarity: rarity.name,
+        });
+      }
     }
 
-    console.log("[Grandoria] Monster drop created:", {
-      itemID: selectedDrop.itemID,
-      monsterId,
-      monsterType: monster.monsterType,
-      rarity: selectedDrop.rarity,
-      sharedItemID,
-    });
+    for (let rollIndex = 0; rollIndex < definition.rolls; rollIndex += 1) {
+      const selectedDrop = this.selectMonsterDrop(definition);
+
+      if (selectedDrop) {
+        selectedDrops.push(selectedDrop);
+      }
+    }
+
+    for (const selectedDrop of selectedDrops) {
+      const sharedItemID = this.createMonsterDropWorldItem(
+        selectedDrop,
+        monsterId,
+        monster,
+        killerSessionId,
+      );
+
+      if (!sharedItemID) {
+        continue;
+      }
+
+      console.log("[Grandoria] Monster drop created:", {
+        itemID: selectedDrop.itemID,
+        monsterId,
+        monsterType: monster.monsterType,
+        quantity: selectedDrop.quantity,
+        rarity: selectedDrop.rarity,
+        sharedItemID,
+      });
+    }
   }
 
   private awardMonsterExperience(
@@ -2625,7 +2821,15 @@ if (
       return;
     }
 
-    const definition = MONSTER_DEFINITIONS[spawn.monsterType];
+    const definition = getMonsterDefinition(spawn.monsterType);
+
+    if (!definition) {
+      console.error("[Grandoria] Monster spawn failed: unknown monster type.", {
+        monsterId: spawn.monsterId,
+        monsterType: spawn.monsterType,
+      });
+      return;
+    }
 
     const monster = new MonsterState();
 
@@ -2638,6 +2842,10 @@ if (
     monster.currentHealth = definition.maxHealth;
     monster.maxHealth = definition.maxHealth;
     monster.isAlive = true;
+    monster.hitboxMinX = definition.hitboxOffsets.minX;
+    monster.hitboxMaxX = definition.hitboxOffsets.maxX;
+    monster.hitboxMinY = definition.hitboxOffsets.minY;
+    monster.hitboxMaxY = definition.hitboxOffsets.maxY;
 
     this.monsterPatrolStates.delete(spawn.monsterId);
 
@@ -3402,8 +3610,10 @@ if (
       }
 
       let reactionState = this.monsterReactionStates.get(monsterId);
+      const canReact =
+        definition.behaviors.chaseAndAttack || definition.behaviors.fleeOnHit;
 
-      if (!reactionState) {
+      if (!reactionState && canReact) {
         const target = this.findClosestMonsterTarget(
           monster,
           definition.detectionRadius,
@@ -3440,6 +3650,12 @@ if (
           definition,
           deltaTime,
         );
+        return;
+      }
+
+      if (!definition.behaviors.randomDirection) {
+        this.monsterPatrolStates.delete(monsterId);
+        monster.animation = "idle";
         return;
       }
 

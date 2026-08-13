@@ -34,6 +34,15 @@ const DEFAULT_OUTPUT_PATH = join(
   "MAP_1.world.json",
 );
 
+const DEFAULT_MONSTER_CATALOG_PATH = join(
+  SERVER_ROOT,
+  "src",
+  "config",
+  "monsters.json",
+);
+
+const MONSTER_CATALOG_SCHEMA_VERSION = 2;
+
 const PLAYER_BLOCKER_OBJECTS = [
   "Alquimia_table",
   "Blacksmith_table",
@@ -84,15 +93,6 @@ const REQUIRED_TILE_MAP_OBJECTS = [
   "pisoMap1",
 ].sort(compareStrings);
 
-const BODY_SOURCE_OBJECTS = [
-  "Collision_attack_unarmed",
-  "Remote_mob_boar",
-  "Remote_mob_hare",
-  "character",
-  "mob_boar",
-  "mob_hare",
-];
-
 const AUTHORIZED_RECOVERY_ENTRY = {
   direction: "down",
   id: "MAP_1/default",
@@ -102,6 +102,12 @@ const AUTHORIZED_RECOVERY_ENTRY = {
 };
 
 const SPAWN_REGION_OBJECT_PREFIX = "regionSpawn_";
+
+const MONSTER_BEHAVIOR_GROUPS = {
+  randomDirection: "MOBS_random_direction",
+  chaseAndAttack: "MOBS_chase_and_attack",
+  fleeOnHit: "MOBS_flee_on_hit",
+};
 
 function compareStrings(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -291,6 +297,10 @@ export function serializeWorldArtifact(artifact) {
   assertNoAbsolutePaths(artifact);
 
   return `${JSON.stringify(canonicalize(artifact), null, 2)}\n`;
+}
+
+export function serializeMonsterCatalog(catalog) {
+  return serializeWorldArtifact(catalog);
 }
 
 export function assertArtifactCurrent(generatedText, existingText) {
@@ -680,7 +690,7 @@ function collectActiveSeparatePairs(eventTrees) {
   return pairs;
 }
 
-function requireObjectGroupMembers(project, layout, groupName) {
+function requireObjectGroupMembers(project, layout, groupName, allowEmpty = false) {
   const matches = [project.objectsGroups, layout.objectsGroups]
     .filter((groups) => groups !== undefined)
     .flatMap((groups) => {
@@ -690,7 +700,8 @@ function requireObjectGroupMembers(project, layout, groupName) {
 
   assertCondition(matches.length === 1, `Object group ${groupName} is missing or ambiguous.`);
   assertCondition(
-    Array.isArray(matches[0].objects) && matches[0].objects.length > 0,
+    Array.isArray(matches[0].objects) &&
+      (allowEmpty || matches[0].objects.length > 0),
     `Object group ${groupName} has no members.`,
   );
 
@@ -703,9 +714,469 @@ function requireObjectGroupMembers(project, layout, groupName) {
   });
 }
 
+function requireStructureVariable(variables, name, label) {
+  assertCondition(Array.isArray(variables), `${label} variables are missing.`);
+  const matches = variables.filter((variable) => variable?.name === name);
+
+  assertCondition(matches.length === 1, `${label}.${name} is missing or duplicated.`);
+  assertCondition(
+    matches[0].type === "structure" && Array.isArray(matches[0].children),
+    `${label}.${name} must have type structure.`,
+  );
+
+  return matches[0];
+}
+
+function requireStructureChild(structure, name, expectedType, label) {
+  const matches = structure.children.filter((child) => child?.name === name);
+
+  assertCondition(matches.length === 1, `${label}.${name} is missing or duplicated.`);
+  assertCondition(
+    matches[0].type === expectedType,
+    `${label}.${name} must have type ${expectedType}.`,
+  );
+
+  return matches[0].value;
+}
+
+function requireNestedStructureChild(structure, name, label) {
+  const matches = structure.children.filter((child) => child?.name === name);
+
+  assertCondition(matches.length === 1, `${label}.${name} is missing or duplicated.`);
+  assertCondition(
+    matches[0].type === "structure" && Array.isArray(matches[0].children),
+    `${label}.${name} must have type structure.`,
+  );
+
+  return matches[0];
+}
+
+function readMonsterDropConfig(config, label) {
+  const dropsConfig = requireNestedStructureChild(config, "Drops", label);
+  const dropsLabel = `${label}.Drops`;
+  const enabled = requireStructureChild(
+    dropsConfig,
+    "Enabled",
+    "boolean",
+    dropsLabel,
+  );
+
+  if (!enabled) {
+    return null;
+  }
+
+  const chancePercent = requireStructureChild(
+    dropsConfig,
+    "ChancePercent",
+    "number",
+    dropsLabel,
+  );
+  const rolls = requireStructureChild(
+    dropsConfig,
+    "Rolls",
+    "number",
+    dropsLabel,
+  );
+
+  assertCondition(
+    Number.isFinite(chancePercent) &&
+      chancePercent >= 0 &&
+      chancePercent <= 100,
+    `${dropsLabel}.ChancePercent must be a number from 0 to 100.`,
+  );
+  assertCondition(
+    Number.isInteger(rolls) && rolls >= 0,
+    `${dropsLabel}.Rolls must be an integer >= 0.`,
+  );
+
+  const reservedNames = new Set(["Enabled", "ChancePercent", "Rolls"]);
+  const rarityStructures = dropsConfig.children.filter(
+    (child) => child?.type === "structure" && !reservedNames.has(child.name),
+  );
+  const unexpectedChildren = dropsConfig.children.filter(
+    (child) =>
+      child &&
+      !reservedNames.has(child.name) &&
+      child.type !== "structure",
+  );
+
+  assertCondition(
+    unexpectedChildren.length === 0,
+    `${dropsLabel} contains unsupported fields: ${unexpectedChildren
+      .map((child) => child.name ?? "<unnamed>")
+      .join(", ")}. Rarities must be structures.`,
+  );
+  assertCondition(
+    rarityStructures.length > 0,
+    `${dropsLabel} must contain at least one rarity structure when Enabled is true.`,
+  );
+
+  const seenRarityNames = new Set();
+  const rarities = rarityStructures
+    .map((rarity) => {
+      const sourceName = rarity.name;
+
+      assertCondition(
+        typeof sourceName === "string" && /^[A-Za-z][A-Za-z0-9_-]*$/.test(sourceName),
+        `${dropsLabel} contains an invalid rarity name: ${sourceName ?? "<missing>"}.`,
+      );
+
+      const name = sourceName.toLowerCase();
+
+      assertCondition(
+        !seenRarityNames.has(name),
+        `${dropsLabel} contains duplicate rarity names after normalization: ${name}.`,
+      );
+      seenRarityNames.add(name);
+
+      const rarityLabel = `${dropsLabel}.${sourceName}`;
+      const weight = requireStructureChild(
+        rarity,
+        "Weight",
+        "number",
+        rarityLabel,
+      );
+
+      assertCondition(
+        Number.isFinite(weight) && weight >= 0,
+        `${rarityLabel}.Weight must be a number >= 0.`,
+      );
+
+      const itemChildren = rarity.children.filter(
+        (child) => typeof child?.name === "string" && /^Item[1-9][0-9]*$/.test(child.name),
+      );
+      const unexpectedRarityChildren = rarity.children.filter(
+        (child) =>
+          child &&
+          child.name !== "Weight" &&
+          !(typeof child.name === "string" && /^Item[1-9][0-9]*$/.test(child.name)),
+      );
+
+      assertCondition(
+        unexpectedRarityChildren.length === 0,
+        `${rarityLabel} contains unsupported fields: ${unexpectedRarityChildren
+          .map((child) => child.name ?? "<unnamed>")
+          .join(", ")}. Use Weight and Item1, Item2, Item3... only.`,
+      );
+      assertCondition(
+        itemChildren.length > 0,
+        `${rarityLabel} must contain at least Item1.`,
+      );
+
+      const indexedItems = itemChildren
+        .map((child) => {
+          const itemLabel = `${rarityLabel}.${child.name}`;
+
+          assertCondition(
+            child.type === "structure" && Array.isArray(child.children),
+            `${itemLabel} must have type structure.`,
+          );
+
+          const itemID = requireStructureChild(
+            child,
+            "ID",
+            "string",
+            itemLabel,
+          );
+          const itemWeight = requireStructureChild(
+            child,
+            "Weight",
+            "number",
+            itemLabel,
+          );
+          const minQuantity = requireStructureChild(
+            child,
+            "MinQuantity",
+            "number",
+            itemLabel,
+          );
+          const maxQuantity = requireStructureChild(
+            child,
+            "MaxQuantity",
+            "number",
+            itemLabel,
+          );
+          const guaranteed = requireStructureChild(
+            child,
+            "Guaranteed",
+            "boolean",
+            itemLabel,
+          );
+
+          assertCondition(
+            typeof itemID === "string" && /^[A-Za-z0-9_-]+$/.test(itemID),
+            `${itemLabel}.ID must contain a valid item ID using only letters, numbers, _ or -.`,
+          );
+          assertCondition(
+            Number.isFinite(itemWeight) && itemWeight >= 0,
+            `${itemLabel}.Weight must be a number >= 0.`,
+          );
+          assertCondition(
+            Number.isInteger(minQuantity) && minQuantity >= 1,
+            `${itemLabel}.MinQuantity must be an integer >= 1.`,
+          );
+          assertCondition(
+            Number.isInteger(maxQuantity) && maxQuantity >= minQuantity,
+            `${itemLabel}.MaxQuantity must be an integer >= MinQuantity.`,
+          );
+          assertCondition(
+            guaranteed || itemWeight > 0,
+            `${itemLabel}.Weight must be greater than 0 when Guaranteed is false.`,
+          );
+
+          const supportedItemFields = new Set([
+            "ID",
+            "Weight",
+            "MinQuantity",
+            "MaxQuantity",
+            "Guaranteed",
+          ]);
+          const unexpectedItemChildren = child.children.filter(
+            (itemChild) =>
+              itemChild &&
+              !supportedItemFields.has(itemChild.name),
+          );
+
+          assertCondition(
+            unexpectedItemChildren.length === 0,
+            `${itemLabel} contains unsupported fields: ${unexpectedItemChildren
+              .map((itemChild) => itemChild.name ?? "<unnamed>")
+              .join(", ")}.`,
+          );
+
+          return {
+            guaranteed,
+            index: Number(child.name.slice("Item".length)),
+            itemID,
+            maxQuantity,
+            minQuantity,
+            weight: itemWeight,
+          };
+        })
+        .sort((left, right) => left.index - right.index);
+
+      indexedItems.forEach((item, index) => {
+        assertCondition(
+          item.index === index + 1,
+          `${rarityLabel} item fields must be contiguous starting at Item1.`,
+        );
+      });
+
+      const items = indexedItems.map(({ index, ...item }) => item);
+      const itemIDs = items.map((item) => item.itemID);
+
+      assertCondition(
+        new Set(itemIDs).size === itemIDs.length,
+        `${rarityLabel} contains duplicate item IDs.`,
+      );
+
+      return {
+        items,
+        name,
+        weight,
+      };
+    })
+    .sort((left, right) => compareStrings(left.name, right.name));
+
+  const randomRarities = rarities.filter(
+    (rarity) =>
+      rarity.weight > 0 &&
+      rarity.items.some((item) => !item.guaranteed && item.weight > 0),
+  );
+
+  if (rolls > 0 && chancePercent > 0) {
+    assertCondition(
+      randomRarities.length > 0,
+      `${dropsLabel} needs at least one positive-weight rarity with a non-guaranteed positive-weight item when Rolls and ChancePercent are greater than 0.`,
+    );
+  }
+
+  return {
+    chancePercent,
+    rarities,
+    rolls,
+  };
+}
+
+function collectMonsterBehaviorMembership(project, layout) {
+  const byBehavior = Object.fromEntries(
+    Object.entries(MONSTER_BEHAVIOR_GROUPS).map(([behaviorKey, groupName]) => [
+      behaviorKey,
+      new Set(requireObjectGroupMembers(project, layout, groupName, true)),
+    ]),
+  );
+
+  const monsterTypes = new Set();
+
+  for (const members of Object.values(byBehavior)) {
+    for (const member of members) {
+      assertCondition(
+        /^mob_[A-Za-z0-9_-]+$/.test(member),
+        `Monster behavior groups may only contain mob_* objects. Invalid member: ${member}`,
+      );
+      monsterTypes.add(member);
+    }
+  }
+
+  assertCondition(monsterTypes.size > 0, "No monster objects were found in behavior groups.");
+
+  return {
+    byBehavior,
+    monsterTypes: [...monsterTypes].sort(compareStrings),
+  };
+}
+
+function readMonsterServerConfig(object, behaviorMembership) {
+  const label = `Object ${object.name}.ServerConfig`;
+  const config = requireStructureVariable(object.variables, "ServerConfig", `Object ${object.name}`);
+  const attackConfig = requireNestedStructureChild(config, "Attack", label);
+  const drops = readMonsterDropConfig(config, label);
+
+  const maxHealth = requireStructureChild(config, "MaxHP", "number", label);
+  const movementSpeed = requireStructureChild(config, "BaseSpeed", "number", label);
+  const reactionSpeed = requireStructureChild(config, "ReactionSpeed", "number", label);
+  const patrolRadius = requireStructureChild(config, "PatrolRadius", "number", label);
+  const detectionRadius = requireStructureChild(config, "DetectionRadius", "number", label);
+  const disengageRadius = requireStructureChild(config, "DisengageRadius", "number", label);
+  const targetStopDistance = requireStructureChild(config, "TargetStopDistance", "number", label);
+  const xpReward = requireStructureChild(config, "XPReward", "number", label);
+  const hurtDurationMs = requireStructureChild(config, "HurtDurationMs", "number", label);
+  const deathDurationMs = requireStructureChild(config, "DeathDurationMs", "number", label);
+
+  const attackEnabled = requireStructureChild(
+    attackConfig,
+    "Enabled",
+    "boolean",
+    `${label}.Attack`,
+  );
+  const attackDamage = requireStructureChild(
+    attackConfig,
+    "Damage",
+    "number",
+    `${label}.Attack`,
+  );
+  const attackRange = requireStructureChild(
+    attackConfig,
+    "Range",
+    "number",
+    `${label}.Attack`,
+  );
+  const attackHitDelayMs = requireStructureChild(
+    attackConfig,
+    "HitDelayMs",
+    "number",
+    `${label}.Attack`,
+  );
+  const attackDurationMs = requireStructureChild(
+    attackConfig,
+    "DurationMs",
+    "number",
+    `${label}.Attack`,
+  );
+  const attackIntervalMs = requireStructureChild(
+    attackConfig,
+    "IntervalMs",
+    "number",
+    `${label}.Attack`,
+  );
+
+  assertCondition(Number.isInteger(maxHealth) && maxHealth > 0, `${label}.MaxHP must be a positive integer.`);
+  assertCondition(Number.isFinite(movementSpeed) && movementSpeed >= 0, `${label}.BaseSpeed must be non-negative.`);
+  assertCondition(Number.isFinite(reactionSpeed) && reactionSpeed >= 0, `${label}.ReactionSpeed must be non-negative.`);
+  assertCondition(Number.isFinite(patrolRadius) && patrolRadius >= 0, `${label}.PatrolRadius must be non-negative.`);
+  assertCondition(Number.isFinite(detectionRadius) && detectionRadius >= 0, `${label}.DetectionRadius must be non-negative.`);
+  assertCondition(Number.isFinite(disengageRadius) && disengageRadius >= detectionRadius, `${label}.DisengageRadius must be >= DetectionRadius.`);
+  assertCondition(Number.isFinite(targetStopDistance) && targetStopDistance >= 0, `${label}.TargetStopDistance must be non-negative.`);
+  assertCondition(Number.isInteger(xpReward) && xpReward >= 0, `${label}.XPReward must be a non-negative integer.`);
+  assertCondition(Number.isFinite(hurtDurationMs) && hurtDurationMs >= 0, `${label}.HurtDurationMs must be non-negative.`);
+  assertCondition(Number.isFinite(deathDurationMs) && deathDurationMs >= 0, `${label}.DeathDurationMs must be non-negative.`);
+  assertCondition(Number.isFinite(attackDamage) && attackDamage >= 0, `${label}.Attack.Damage must be non-negative.`);
+  assertCondition(Number.isFinite(attackRange) && attackRange >= 0, `${label}.Attack.Range must be non-negative.`);
+  assertCondition(Number.isFinite(attackHitDelayMs) && attackHitDelayMs >= 0, `${label}.Attack.HitDelayMs must be non-negative.`);
+  assertCondition(Number.isFinite(attackDurationMs) && attackDurationMs >= 0, `${label}.Attack.DurationMs must be non-negative.`);
+  assertCondition(Number.isFinite(attackIntervalMs) && attackIntervalMs >= 0, `${label}.Attack.IntervalMs must be non-negative.`);
+  assertCondition(
+    attackHitDelayMs <= attackDurationMs,
+    `${label}.Attack.HitDelayMs must be <= Attack.DurationMs.`,
+  );
+
+  const behaviors = {
+    randomDirection: behaviorMembership.randomDirection.has(object.name),
+    chaseAndAttack: behaviorMembership.chaseAndAttack.has(object.name),
+    fleeOnHit: behaviorMembership.fleeOnHit.has(object.name),
+  };
+
+  assertCondition(
+    !(behaviors.chaseAndAttack && behaviors.fleeOnHit),
+    `${object.name} cannot use both MOBS_chase_and_attack and MOBS_flee_on_hit in exporter version ${EXPORTER_VERSION}.`,
+  );
+  assertCondition(
+    attackEnabled === behaviors.chaseAndAttack,
+    `${object.name}.ServerConfig.Attack.Enabled must match membership in ${MONSTER_BEHAVIOR_GROUPS.chaseAndAttack}.`,
+  );
+
+  return {
+    attack: attackEnabled
+      ? {
+          damage: attackDamage,
+          durationMs: attackDurationMs,
+          hitDelayMs: attackHitDelayMs,
+          intervalMs: attackIntervalMs,
+          range: attackRange,
+        }
+      : null,
+    behaviors,
+    bodyProfileId: object.name,
+    deathDurationMs,
+    detectionRadius,
+    disengageRadius,
+    drops,
+    hurtDurationMs,
+    maxHealth,
+    movementSpeed,
+    patrolRadius,
+    reactionMode: behaviors.fleeOnHit
+      ? "flee"
+      : behaviors.chaseAndAttack
+        ? "chase"
+        : "none",
+    reactionSpeed,
+    targetStopDistance,
+    xpReward,
+  };
+}
+
+function buildMonsterCatalogFromProject(project, layout, objectRegistry, sourceProject) {
+  const membership = collectMonsterBehaviorMembership(project, layout);
+  const definitions = {};
+
+  for (const monsterType of membership.monsterTypes) {
+    const objectRecord = objectRegistry.requireObject(monsterType);
+
+    assertCondition(
+      objectRecord.object.type === "Sprite",
+      `${monsterType} must be a Sprite object.`,
+    );
+
+    definitions[monsterType] = readMonsterServerConfig(
+      objectRecord.object,
+      membership.byBehavior,
+    );
+  }
+
+  return {
+    catalogSchemaVersion: MONSTER_CATALOG_SCHEMA_VERSION,
+    definitions,
+    exporterVersion: EXPORTER_VERSION,
+    source: {
+      project: sourceProject,
+    },
+  };
+}
+
 function validateCollisionClassifications(project, layout) {
   const playerObjects = new Set();
-  const monsterObjects = new Set();
+  const activeMonsterObjects = new Set();
   const playerMovers = new Set(["character"]);
   const monsterMovers = new Set([
     "MOBS_random_direction",
@@ -744,24 +1215,31 @@ function validateCollisionClassifications(project, layout) {
     if (channel === "player") {
       playerObjects.add(blockerObject);
     } else {
-      monsterObjects.add(blockerObject);
+      activeMonsterObjects.add(blockerObject);
     }
   }
 
   const discoveredPlayer = [...playerObjects].sort(compareStrings);
-  const discoveredMonster = [...monsterObjects].sort(compareStrings);
+  const discoveredActiveMonster = [...activeMonsterObjects].sort(compareStrings);
 
   assertCondition(
     JSON.stringify(discoveredPlayer) === JSON.stringify(PLAYER_BLOCKER_OBJECTS),
     `Active player collider classification changed. Discovered: ${discoveredPlayer.join(", ")}`,
   );
+
+  const unexpectedActiveMonsterBlockers = discoveredActiveMonster.filter(
+    (objectName) => !MONSTER_BLOCKER_OBJECTS.includes(objectName),
+  );
+
   assertCondition(
-    JSON.stringify(discoveredMonster) === JSON.stringify(MONSTER_BLOCKER_OBJECTS),
-    `Active monster collider classification changed. Discovered: ${discoveredMonster.join(", ")}`,
+    unexpectedActiveMonsterBlockers.length === 0,
+    `Unexpected active monster collider classification. Discovered: ${discoveredActiveMonster.join(", ")}`,
   );
 
   return {
-    monster: discoveredMonster,
+    // Monster collision is server-authoritative. The exporter no longer depends on
+    // active GDevelop SeparateFromObjects actions for monster movement.
+    monster: [...MONSTER_BLOCKER_OBJECTS],
     player: discoveredPlayer,
   };
 }
@@ -1403,8 +1881,10 @@ function createBodyProfile(id, aliases, frame, verification) {
   };
 }
 
-function extractBodyProfiles(objectRegistry) {
-  BODY_SOURCE_OBJECTS.forEach((name) => objectRegistry.requireObject(name));
+function extractBodyProfiles(objectRegistry, monsterTypes) {
+  objectRegistry.requireObject("character");
+  objectRegistry.requireObject("Collision_attack_unarmed");
+  monsterTypes.forEach((name) => objectRegistry.requireObject(name));
 
   const characterRecord = objectRegistry.requireObject("character");
   const characterFrames = getAllObjectFrames(characterRecord.object, "character");
@@ -1415,75 +1895,67 @@ function extractBodyProfiles(objectRegistry) {
     "The character movement body is not stable across its source frames.",
   );
 
-  const hareSources = ["mob_hare", "Remote_mob_hare"].map((name) => {
-    const record = objectRegistry.requireObject(name);
-    const frames = getAllObjectFrames(record.object, name);
+  const monsterProfiles = [];
+  const monsterAttackMasks = [];
+
+  for (const monsterType of monsterTypes) {
+    const record = objectRegistry.requireObject(monsterType);
+    const frames = getAllObjectFrames(record.object, monsterType);
     const groups = uniqueGeometryGroups(frames);
 
-    assertCondition(groups.length === 1, `${name} does not have one stable body.`);
-    assertCondition(frames.length === 100, `${name} no longer contains 100 verified frames.`);
+    assertCondition(groups.length > 0, `${monsterType} has no collision geometry groups.`);
 
-    return { frames, name, representative: groups[0].frame };
-  });
+    if (groups.length > 1) {
+      assertCondition(
+        groups[0].frames.length > groups[1].frames.length,
+        `${monsterType} has no unique dominant movement collision body.`,
+      );
+    }
 
-  assertCondition(
-    polygonSetsEqual(
-      hareSources[0].representative.originRelativePolygons,
-      hareSources[1].representative.originRelativePolygons,
-    ) &&
-      pointsEqual(hareSources[0].representative.origin, hareSources[1].representative.origin),
-    "Local and remote hare bodies differ.",
-  );
-
-  const boarSources = ["mob_boar", "Remote_mob_boar"].map((name) => {
-    const record = objectRegistry.requireObject(name);
-    const frames = getAllObjectFrames(record.object, name);
-    const groups = uniqueGeometryGroups(frames);
-
-    assertCondition(frames.length === 120, `${name} no longer contains 120 verified frames.`);
-    assertCondition(groups[0].frames.length === 116, `${name} baseline is not present in 116 frames.`);
-
+    const baselineGroup = groups[0];
     const changedFrames = groups
       .slice(1)
       .flatMap((group) => group.frames)
-      .sort((left, right) => compareStrings(left.animationName, right.animationName));
+      .sort((left, right) => {
+        const animationOrder = compareStrings(left.animationName, right.animationName);
+        return animationOrder !== 0 ? animationOrder : left.frameIndex - right.frameIndex;
+      });
 
-    assertCondition(changedFrames.length === 4, `${name} must expose four boar attack masks.`);
     changedFrames.forEach((frame) => {
       assertCondition(
-        frame.animationName.startsWith("attack_") && frame.frameIndex === 3,
-        `${name} has unexpected non-baseline body geometry.`,
+        frame.animationName.startsWith("attack_"),
+        `${monsterType} changes collision geometry outside attack_* animations. ` +
+          "Movement collision must stay stable across idle/walk/run/hurt/death frames.",
       );
     });
 
-    return {
-      baseline: groups[0].frame,
-      changedFrames,
-      frames,
-      name,
-    };
-  });
-
-  assertCondition(
-    polygonSetsEqual(
-      boarSources[0].baseline.originRelativePolygons,
-      boarSources[1].baseline.originRelativePolygons,
-    ) && pointsEqual(boarSources[0].baseline.origin, boarSources[1].baseline.origin),
-    "Local and remote boar baseline bodies differ.",
-  );
-
-  for (let index = 0; index < boarSources[0].changedFrames.length; index += 1) {
-    const localFrame = boarSources[0].changedFrames[index];
-    const remoteFrame = boarSources[1].changedFrames[index];
-
-    assertCondition(
-      localFrame.animationName === remoteFrame.animationName &&
-        polygonSetsEqual(
-          localFrame.originRelativePolygons,
-          remoteFrame.originRelativePolygons,
-        ),
-      "Local and remote boar attack masks differ.",
+    monsterProfiles.push(
+      createBodyProfile(monsterType, [monsterType], baselineGroup.frame, {
+        baselineFrameCount: baselineGroup.frames.length,
+        changedAttackMaskCount: changedFrames.length,
+        sourceObjects: [monsterType],
+        stableMovementBodyDecision:
+          groups.length === 1
+            ? "stable_across_all_frames"
+            : "dominant_baseline_with_attack_only_variants",
+        verifiedFrameCount: frames.length,
+      }),
     );
+
+    changedFrames.forEach((frame) => {
+      monsterAttackMasks.push({
+        direction: frame.animationName.slice("attack_".length),
+        frameIndex: frame.frameIndex,
+        id: `${monsterType}:attack:${frame.animationName.slice("attack_".length)}:${frame.frameIndex}`,
+        monsterType,
+        originRelativePolygons: frame.originRelativePolygons,
+        role: "combat_attack_frame_mask",
+        sourceAnimation: frame.animationName,
+        sourceOrigin: frame.origin,
+        sourcePolygons: frame.sourcePolygons,
+        verifiedAliases: [monsterType],
+      });
+    });
   }
 
   const attackRecord = objectRegistry.requireObject("Collision_attack_unarmed");
@@ -1516,42 +1988,8 @@ function extractBodyProfiles(objectRegistry) {
       sourceObjects: ["character"],
       stableAcrossAllFrames: true,
     }),
-    createBodyProfile(
-      "mob_boar",
-      ["Remote_mob_boar", "mob_boar"],
-      boarSources[0].baseline,
-      {
-        baselineFrameCountPerSource: 116,
-        sourceObjects: ["Remote_mob_boar", "mob_boar"],
-        stableMovementBodyDecision: "verified_baseline_rectangle",
-        verifiedFrameCountPerSource: 120,
-      },
-    ),
-    createBodyProfile(
-      "mob_hare",
-      ["Remote_mob_hare", "mob_hare"],
-      hareSources[0].representative,
-      {
-        sourceObjects: ["Remote_mob_hare", "mob_hare"],
-        stableAcrossAllFrames: true,
-        verifiedFrameCountPerSource: 100,
-      },
-    ),
+    ...monsterProfiles,
   ].sort((left, right) => compareStrings(left.id, right.id));
-
-  const boarAttackMasks = boarSources[0].changedFrames
-    .map((frame) => ({
-      direction: frame.animationName.slice("attack_".length),
-      frameIndex: frame.frameIndex,
-      id: `mob_boar:attack:${frame.animationName.slice("attack_".length)}`,
-      originRelativePolygons: frame.originRelativePolygons,
-      role: "combat_attack_frame_mask",
-      sourceAnimation: frame.animationName,
-      sourceOrigin: frame.origin,
-      sourcePolygons: frame.sourcePolygons,
-      verifiedAliases: ["Remote_mob_boar", "mob_boar"],
-    }))
-    .sort((left, right) => compareStrings(left.id, right.id));
 
   const playerAttackHitboxes = effectivePlayerAttacks
     .map((frame) => ({
@@ -1567,7 +2005,9 @@ function extractBodyProfiles(objectRegistry) {
   return {
     bodyProfiles,
     combatGeometry: {
-      boarAttackMasks,
+      monsterAttackMasks: monsterAttackMasks.sort((left, right) =>
+        compareStrings(left.id, right.id),
+      ),
       playerUnarmedAttackHitboxes: {
         degenerateFrameMaskCount: degeneratePlayerAttackFrames,
         excludedFromMovementBodies: true,
@@ -2439,6 +2879,7 @@ export function buildWorldArtifact({ projectPath }) {
 
   const objectRegistry = createObjectRegistry(project, layout);
   const resourceRegistry = createResourceRegistry(project, projectRoot);
+  const monsterMembership = collectMonsterBehaviorMembership(project, layout);
   const classifications = validateCollisionClassifications(project, layout);
   const extractedColliders = extractColliders(
     layout,
@@ -2446,7 +2887,6 @@ export function buildWorldArtifact({ projectPath }) {
     resourceRegistry,
     classifications,
   );
-  const bodies = extractBodyProfiles(objectRegistry);
   const tileContext = extractTileMapContext(
     layout,
     objectRegistry,
@@ -2456,6 +2896,20 @@ export function buildWorldArtifact({ projectPath }) {
     layout,
     objectRegistry,
     resourceRegistry,
+  );
+
+  const knownMonsterTypes = new Set(monsterMembership.monsterTypes);
+
+  spawnRegions.forEach((region) => {
+    assertCondition(
+      knownMonsterTypes.has(region.mobType),
+      `${region.id}.MobType ${region.mobType} is not present in any supported monster behavior group.`,
+    );
+  });
+
+  const bodies = extractBodyProfiles(
+    objectRegistry,
+    monsterMembership.monsterTypes,
   );
 
   const recoveryEvidence = {
@@ -2582,6 +3036,53 @@ export function buildWorldArtifact({ projectPath }) {
   return artifact;
 }
 
+export function buildMonsterCatalog({ projectPath }) {
+  assertCondition(
+    typeof projectPath === "string" && projectPath.length > 0,
+    "A canonical GDevelop project path is required.",
+  );
+
+  const absoluteProjectPath = resolve(projectPath);
+
+  assertCondition(existsSync(absoluteProjectPath), `Canonical project is missing: ${projectPath}`);
+  assertCondition(
+    basename(absoluteProjectPath) === EXPECTED_PROJECT_FILE,
+    `Only ${EXPECTED_PROJECT_FILE} may be used as the canonical source.`,
+  );
+
+  const projectBytes = readFileSync(absoluteProjectPath);
+  const normalizedProjectBytes = normalizeJsonSourceBytes(projectBytes);
+  const project = parseJson(projectBytes, EXPECTED_PROJECT_FILE);
+
+  assertCondition(
+    project.firstLayout === EXPECTED_FIRST_LAYOUT,
+    `firstLayout must remain ${EXPECTED_FIRST_LAYOUT}.`,
+  );
+
+  const layouts = project.layouts?.filter((layout) => layout.name === MAP_ID) ?? [];
+
+  assertCondition(layouts.length === 1, `${MAP_ID} layout is missing or ambiguous.`);
+
+  const layout = layouts[0];
+  const objectRegistry = createObjectRegistry(project, layout);
+  const sourceProject = {
+    file: EXPECTED_PROJECT_FILE,
+    sha256: sha256(normalizedProjectBytes),
+    sizeBytes: normalizedProjectBytes.length,
+  };
+  const catalog = buildMonsterCatalogFromProject(
+    project,
+    layout,
+    objectRegistry,
+    sourceProject,
+  );
+
+  validateJsonValue(catalog);
+  assertNoAbsolutePaths(catalog);
+
+  return catalog;
+}
+
 function escapeXml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -2674,7 +3175,7 @@ export function createSvgPreview(artifact) {
     return `<g class="world-shape"><line x1="${x - 7}" y1="${y - 7}" x2="${x + 7}" y2="${y + 7}" class="degenerate" /><line x1="${x + 7}" y1="${y - 7}" x2="${x - 7}" y2="${y + 7}" class="degenerate" /></g>`;
   });
   const spawnRegionShapes = artifact.spawnRegions.flatMap((region) => {
-    const color = region.mobType === "mob_hare" ? "#eab308" : "#dc2626";
+    const color = "#dc2626";
     const polygon = [
       { x: region.bounds.minX, y: region.bounds.minY },
       { x: region.bounds.maxX, y: region.bounds.minY },
@@ -2695,25 +3196,11 @@ export function createSvgPreview(artifact) {
     ...artifact.anchors.monsterSpawns,
   ].flatMap((anchor) => {
     const color =
-      anchor.kind === "player_recovery_entry"
-        ? "#22c55e"
-        : anchor.bodyProfileId === "mob_hare"
-          ? "#eab308"
-          : "#dc2626";
+      anchor.kind === "player_recovery_entry" ? "#22c55e" : "#dc2626";
     const marker =
       anchor.kind === "player_recovery_entry"
         ? `<circle cx="${anchor.x}" cy="${anchor.y}" r="9" fill="${color}" class="world-shape" />`
-        : anchor.bodyProfileId === "mob_hare"
-          ? svgPolygon(
-              [
-                { x: anchor.x, y: anchor.y - 10 },
-                { x: anchor.x + 10, y: anchor.y },
-                { x: anchor.x, y: anchor.y + 10 },
-                { x: anchor.x - 10, y: anchor.y },
-              ],
-              `fill="${color}" class="world-shape"`,
-            )
-          : `<rect x="${anchor.x - 9}" y="${anchor.y - 9}" width="18" height="18" fill="${color}" class="world-shape" />`;
+        : `<rect x="${anchor.x - 9}" y="${anchor.y - 9}" width="18" height="18" fill="${color}" class="world-shape" />`;
 
     return [
       ...anchor.worldBody.polygons.map((polygon) =>
@@ -2855,22 +3342,47 @@ function runCli(argv) {
 
   const firstArtifact = buildWorldArtifact({ projectPath });
   const secondArtifact = buildWorldArtifact({ projectPath });
+  const firstMonsterCatalog = buildMonsterCatalog({ projectPath });
+  const secondMonsterCatalog = buildMonsterCatalog({ projectPath });
   const generatedText = serializeWorldArtifact(firstArtifact);
   const repeatedText = serializeWorldArtifact(secondArtifact);
+  const generatedMonsterCatalogText = serializeMonsterCatalog(firstMonsterCatalog);
+  const repeatedMonsterCatalogText = serializeMonsterCatalog(secondMonsterCatalog);
 
   assertCondition(
     generatedText === repeatedText,
-    "Exporter output is unstable for unchanged source bytes.",
+    "World artifact output is unstable for unchanged source bytes.",
+  );
+  assertCondition(
+    generatedMonsterCatalogText === repeatedMonsterCatalogText,
+    "Monster catalog output is unstable for unchanged source bytes.",
   );
 
   if (options.check) {
     assertCondition(existsSync(outputPath), `Committed artifact is missing: ${outputPath}`);
     assertArtifactCurrent(generatedText, readFileSync(outputPath, "utf8"));
+    assertCondition(
+      existsSync(DEFAULT_MONSTER_CATALOG_PATH),
+      `Committed monster catalog is missing: ${DEFAULT_MONSTER_CATALOG_PATH}`,
+    );
+    assertCondition(
+      generatedMonsterCatalogText ===
+        readFileSync(DEFAULT_MONSTER_CATALOG_PATH, "utf8"),
+      "The committed monster catalog is stale. Run the exporter and review the diff.",
+    );
     console.log(`World artifact is current: ${outputPath}`);
+    console.log(`Monster catalog is current: ${DEFAULT_MONSTER_CATALOG_PATH}`);
   } else {
     mkdirSync(dirname(outputPath), { recursive: true });
     writeFileSync(outputPath, generatedText, "utf8");
+    mkdirSync(dirname(DEFAULT_MONSTER_CATALOG_PATH), { recursive: true });
+    writeFileSync(
+      DEFAULT_MONSTER_CATALOG_PATH,
+      generatedMonsterCatalogText,
+      "utf8",
+    );
     console.log(`World artifact exported: ${outputPath}`);
+    console.log(`Monster catalog exported: ${DEFAULT_MONSTER_CATALOG_PATH}`);
   }
 
   if (svgPath) {

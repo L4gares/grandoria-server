@@ -1,0 +1,86 @@
+{
+  "catalogSchemaVersion": 2,
+  "definitions": {
+    "mob_boar": {
+      "attack": {
+        "damage": 7,
+        "durationMs": 400,
+        "hitDelayMs": 240,
+        "intervalMs": 2000,
+        "range": 32
+      },
+      "behaviors": {
+        "chaseAndAttack": true,
+        "fleeOnHit": false,
+        "randomDirection": true
+      },
+      "bodyProfileId": "mob_boar",
+      "deathDurationMs": 480,
+      "detectionRadius": 128,
+      "disengageRadius": 192,
+      "drops": null,
+      "hurtDurationMs": 320,
+      "maxHealth": 10,
+      "movementSpeed": 15,
+      "patrolRadius": 96,
+      "reactionMode": "chase",
+      "reactionSpeed": 50,
+      "targetStopDistance": 16,
+      "xpReward": 50
+    },
+    "mob_hare": {
+      "attack": null,
+      "behaviors": {
+        "chaseAndAttack": false,
+        "fleeOnHit": true,
+        "randomDirection": true
+      },
+      "bodyProfileId": "mob_hare",
+      "deathDurationMs": 480,
+      "detectionRadius": 128,
+      "disengageRadius": 192,
+      "drops": {
+        "chancePercent": 80,
+        "rarities": [
+          {
+            "items": [
+              {
+                "guaranteed": true,
+                "itemID": "rabbit_skin",
+                "maxQuantity": 1,
+                "minQuantity": 1,
+                "weight": 1
+              },
+              {
+                "guaranteed": false,
+                "itemID": "rabbit_foot",
+                "maxQuantity": 1,
+                "minQuantity": 1,
+                "weight": 1
+              }
+            ],
+            "name": "common",
+            "weight": 70
+          }
+        ],
+        "rolls": 1
+      },
+      "hurtDurationMs": 320,
+      "maxHealth": 2,
+      "movementSpeed": 25,
+      "patrolRadius": 96,
+      "reactionMode": "flee",
+      "reactionSpeed": 45,
+      "targetStopDistance": 0,
+      "xpReward": 20
+    }
+  },
+  "exporterVersion": 1,
+  "source": {
+    "project": {
+      "file": "RPG-2D-project-Grandoria-Colyseus-authoritative-inventory-equipment.json",
+      "sha256": "b31015e733440130cf0dc89ed94f1cf26c93b0afe7b3fe51932ef7d0d41c48ce",
+      "sizeBytes": 5811368
+    }
+  }
+}
