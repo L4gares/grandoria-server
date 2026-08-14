@@ -40,21 +40,14 @@
       "detectionRadius": 128,
       "disengageRadius": 192,
       "drops": {
-        "chancePercent": 80,
+        "chancePercent": 100,
         "rarities": [
           {
             "items": [
               {
-                "guaranteed": true,
-                "itemID": "rabbit_skin",
-                "maxQuantity": 1,
-                "minQuantity": 1,
-                "weight": 1
-              },
-              {
                 "guaranteed": false,
-                "itemID": "rabbit_foot",
-                "maxQuantity": 1,
+                "itemID": "item_test",
+                "maxQuantity": 5,
                 "minQuantity": 1,
                 "weight": 1
               }
@@ -79,8 +72,8 @@
   "source": {
     "project": {
       "file": "RPG-2D-project-Grandoria-Colyseus-authoritative-inventory-equipment.json",
-      "sha256": "b31015e733440130cf0dc89ed94f1cf26c93b0afe7b3fe51932ef7d0d41c48ce",
-      "sizeBytes": 5811368
+      "sha256": "3a900ad39b1b3f78593deb53caf1162683da4733f80e82b1d4fc60c612d1dbb5",
+      "sizeBytes": 5781531
     }
   }
 }

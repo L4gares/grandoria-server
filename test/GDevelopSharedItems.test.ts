@@ -135,13 +135,145 @@ describe("GDevelop Colyseus shared item migration", () => {
       }
     }
 
+    const serverCatalogEntries = Object.entries(ITEM_DEFINITIONS).map(
+      ([itemID, definition]) => [
+        itemID,
+        {
+          maxStack: definition.maxStack,
+          subType: definition.subType,
+          type: definition.type,
+        },
+      ] as const,
+    );
+
     assert.deepStrictEqual(
       [...catalogEntries.entries()].sort(([first], [second]) =>
         first.localeCompare(second),
       ),
-      Object.entries(ITEM_DEFINITIONS).sort(([first], [second]) =>
+      serverCatalogEntries.sort(([first], [second]) =>
         first.localeCompare(second),
       ),
     );
+  });
+
+  it("uses one canonical global visual object for every catalog item", () => {
+    const itemIDs = Object.keys(ITEM_DEFINITIONS).sort();
+
+    for (const itemID of itemIDs) {
+      const matches = project.objects.filter(
+        (object: JsonObject) => object.name === itemID,
+      );
+
+      assert.strictEqual(matches.length, 1, `${itemID} visual must be unique.`);
+      assert.strictEqual(matches[0].type, "Sprite");
+      assert.strictEqual(matches[0].animations[0]?.name, itemID);
+      assert.ok(matches[0].animations[0]?.directions[0]?.sprites.length > 0);
+    }
+
+    const legacyItemsObject = project.objects.find(
+      (object: JsonObject) => object.name === "items",
+    );
+
+    assert.ok(legacyItemsObject);
+    assert.deepStrictEqual(
+      legacyItemsObject.animations.map((animation: JsonObject) => animation.name),
+      ["legacy_disabled"],
+    );
+    assert.strictEqual(
+      project.objects.some(
+        (object: JsonObject) => object.name === "market_slot_item",
+      ),
+      false,
+    );
+
+    const mapLayout = project.layouts.find(
+      (layout: JsonObject) => layout.name === "MAP_1",
+    );
+    const marketSlotObject = mapLayout.objects.find(
+      (object: JsonObject) => object.name === "market_slot",
+    );
+
+    assert.ok(marketSlotObject);
+    assert.deepStrictEqual(
+      marketSlotObject.animations.map(
+        (animation: JsonObject) => animation.name,
+      ),
+      ["background"],
+    );
+  });
+
+  it("creates ground drops and market icons from the canonical item objects", () => {
+    const sharedItemsCode = findInlineBlocks(sharedItemsGroup).join("\n");
+    const genericVisualsGroup = findGroup(
+      project,
+      "INVENTORY — GENERIC ITEM VISUALS",
+    );
+
+    assert.ok(genericVisualsGroup);
+
+    const genericVisualsCode = findInlineBlocks(genericVisualsGroup).join("\n");
+
+    assert.match(
+      sharedItemsCode,
+      /runtimeScene\.createObject\(\s*itemID\s*\)/,
+    );
+    assert.doesNotMatch(
+      sharedItemsCode,
+      /runtimeScene\.createObject\(\s*"items"\s*\)/,
+    );
+    assert.match(
+      sharedItemsCode,
+      /Object\.values\(\s*sharedItemsState\.visuals\s*\)/,
+    );
+    assert.match(sharedItemsCode, /\.get\("item_id"\)/);
+
+    assert.match(genericVisualsCode, /marketSlots/);
+    assert.match(
+      genericVisualsCode,
+      /runtimeScene\.getObjects\("market_slot"\)/,
+    );
+    assert.match(genericVisualsCode, /createVisual\(itemID, "market"\)/);
+    assert.doesNotThrow(() => {
+      new Function("runtimeScene", genericVisualsCode);
+    });
+  });
+
+  it("does not read item identity from aggregate slot animations", () => {
+    const marketLoadGroup = findGroup(
+      project,
+      "MARKET — CLEAR AND LOAD ITEMS",
+    );
+    const marketSelectionGroup = findGroup(project, "MARKET — SELECT ITEM");
+
+    assert.ok(marketLoadGroup);
+    assert.ok(marketSelectionGroup);
+
+    const serializedMarket = JSON.stringify([
+      marketLoadGroup,
+      marketSelectionGroup,
+    ]);
+
+    assert.doesNotMatch(
+      serializedMarket,
+      /slot_item_display\.Animation::Name\(\)/,
+    );
+    assert.match(
+      serializedMarket,
+      /inventory\[slot_item_display\.slot_index\]\.id/,
+    );
+
+    const marketSlotAnimationValues: string[] = [];
+
+    visitObjects(marketLoadGroup, (entry) => {
+      if (
+        entry.type?.value ===
+          "AnimatableCapability::AnimatableBehavior::SetName" &&
+        entry.parameters?.[0] === "market_slot"
+      ) {
+        marketSlotAnimationValues.push(entry.parameters[3]);
+      }
+    });
+
+    assert.deepStrictEqual(marketSlotAnimationValues, ['"background"']);
   });
 });

@@ -7,7 +7,7 @@ import {
 import { basename, join, resolve } from "node:path";
 
 export const CANONICAL_GDEVELOP_PROJECT_FILE =
-  "RPG-2D-project-organized-by-systems-pre-combat-english.json";
+  "RPG-2D-project-Grandoria-Colyseus-authoritative-inventory-equipment.json";
 
 function isFile(filePath) {
   try {

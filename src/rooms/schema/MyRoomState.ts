@@ -98,6 +98,12 @@ export class PlayerState extends Schema {
   @type("boolean")
   isAlive: boolean = true;
 
+  @type("number")
+  gold: number = 0;
+
+  @type("number")
+  gem: number = 0;
+
   @type(PlayerAppearanceState)
   appearance = new PlayerAppearanceState();
 

@@ -41,7 +41,15 @@ const DEFAULT_MONSTER_CATALOG_PATH = join(
   "monsters.json",
 );
 
+const DEFAULT_ITEM_CATALOG_PATH = join(
+  SERVER_ROOT,
+  "src",
+  "items",
+  "items.json",
+);
+
 const MONSTER_CATALOG_SCHEMA_VERSION = 2;
+const ITEM_CATALOG_SCHEMA_VERSION = 1;
 
 const PLAYER_BLOCKER_OBJECTS = [
   "Alquimia_table",
@@ -300,6 +308,10 @@ export function serializeWorldArtifact(artifact) {
 }
 
 export function serializeMonsterCatalog(catalog) {
+  return serializeWorldArtifact(catalog);
+}
+
+export function serializeItemCatalog(catalog) {
   return serializeWorldArtifact(catalog);
 }
 
@@ -2035,6 +2047,304 @@ function childVariable(variable, name) {
   return child.value;
 }
 
+function readOptionalStructureChild(structure, name, expectedType, label) {
+  const matches = structure.children.filter((child) => child?.name === name);
+
+  assertCondition(matches.length <= 1, `${label}.${name} is duplicated.`);
+
+  if (matches.length === 0) {
+    return undefined;
+  }
+
+  assertCondition(
+    matches[0].type === expectedType,
+    `${label}.${name} must have type ${expectedType}.`,
+  );
+
+  return matches[0].value;
+}
+
+function readOptionalNestedStructureChild(structure, name, label) {
+  const matches = structure.children.filter((child) => child?.name === name);
+
+  assertCondition(matches.length <= 1, `${label}.${name} is duplicated.`);
+
+  if (matches.length === 0) {
+    return undefined;
+  }
+
+  assertCondition(
+    matches[0].type === "structure" && Array.isArray(matches[0].children),
+    `${label}.${name} must have type structure.`,
+  );
+
+  return matches[0];
+}
+
+function readGenericGDevelopVariable(variable, label) {
+  assertCondition(variable && typeof variable === "object", `${label} is malformed.`);
+
+  switch (variable.type) {
+    case "number":
+      return assertFiniteNumber(variable.value, label);
+
+    case "string":
+      assertCondition(typeof variable.value === "string", `${label} must be string.`);
+      return variable.value;
+
+    case "boolean":
+      assertCondition(typeof variable.value === "boolean", `${label} must be boolean.`);
+      return variable.value;
+
+    case "structure": {
+      assertCondition(Array.isArray(variable.children), `${label} structure children are missing.`);
+      const result = {};
+      const seenNames = new Set();
+
+      for (const child of variable.children) {
+        assertCondition(
+          child && typeof child.name === "string" && child.name.length > 0,
+          `${label} contains an unnamed structure child.`,
+        );
+        assertCondition(!seenNames.has(child.name), `${label}.${child.name} is duplicated.`);
+        seenNames.add(child.name);
+        result[child.name] = readGenericGDevelopVariable(
+          child,
+          `${label}.${child.name}`,
+        );
+      }
+
+      return result;
+    }
+
+    case "array": {
+      assertCondition(Array.isArray(variable.children), `${label} array children are missing.`);
+      return variable.children.map((child, index) =>
+        readGenericGDevelopVariable(child, `${label}[${index}]`),
+      );
+    }
+
+    default:
+      fail(`${label} uses unsupported GDevelop variable type ${String(variable.type)}.`);
+  }
+}
+
+function requireCatalogStructureChildren(structure, label) {
+  assertCondition(
+    structure?.type === "structure" && Array.isArray(structure.children),
+    `${label} must have type structure.`,
+  );
+
+  const seenNames = new Set();
+
+  return structure.children.map((child) => {
+    assertCondition(
+      child && typeof child.name === "string" && child.name.trim().length > 0,
+      `${label} contains an unnamed child.`,
+    );
+    assertCondition(
+      !/[\u0000-\u001F\u007F]/.test(child.name),
+      `${label}.${child.name} contains control characters.`,
+    );
+    assertCondition(!seenNames.has(child.name), `${label}.${child.name} is duplicated.`);
+    seenNames.add(child.name);
+    assertCondition(
+      child.type === "structure" && Array.isArray(child.children),
+      `${label}.${child.name} must have type structure.`,
+    );
+    return child;
+  });
+}
+
+function readItemDefinitionFromGDevelop(item, typeName, subTypeName) {
+  const itemID = item.name;
+  const label = `Global variable items_data.${typeName}.${subTypeName}.${itemID}`;
+
+  assertCondition(
+    /^[A-Za-z0-9_-]+$/.test(itemID),
+    `${label} item ID must use only letters, numbers, _ or -.`,
+  );
+
+  const maxStack = requireStructureChild(item, "max_stack", "number", label);
+  const nameDisplay = requireStructureChild(item, "name_display", "string", label);
+  const rarity = requireStructureChild(item, "rarity", "string", label);
+  const sellPrice = requireStructureChild(item, "sell_price", "number", label);
+  const visualKey = requireStructureChild(item, "id_icon", "string", label);
+  const goldPrice = readOptionalStructureChild(item, "Gold_price", "number", label);
+  const gemPrice = readOptionalStructureChild(item, "Gem_price", "number", label);
+  const attributesSource = readOptionalNestedStructureChild(item, "atributes", label);
+
+  assertCondition(
+    Number.isInteger(maxStack) && maxStack >= 1,
+    `${label}.max_stack must be an integer >= 1.`,
+  );
+  assertCondition(
+    typeof nameDisplay === "string" && nameDisplay.trim().length > 0,
+    `${label}.name_display must be a non-empty string.`,
+  );
+  assertCondition(
+    typeof rarity === "string" && rarity.trim().length > 0,
+    `${label}.rarity must be a non-empty string.`,
+  );
+  assertCondition(
+    typeof visualKey === "string" && visualKey.trim().length > 0,
+    `${label}.id_icon must be a non-empty string.`,
+  );
+  assertCondition(
+    Number.isFinite(sellPrice) && sellPrice >= 0,
+    `${label}.sell_price must be a number >= 0.`,
+  );
+
+  if (goldPrice !== undefined) {
+    assertCondition(
+      Number.isFinite(goldPrice) && goldPrice >= 0,
+      `${label}.Gold_price must be a number >= 0.`,
+    );
+  }
+
+  if (gemPrice !== undefined) {
+    assertCondition(
+      Number.isFinite(gemPrice) && gemPrice >= 0,
+      `${label}.Gem_price must be a number >= 0.`,
+    );
+  }
+
+  const attributes = attributesSource
+    ? readGenericGDevelopVariable(attributesSource, `${label}.atributes`)
+    : {};
+
+  return {
+    attributes,
+    ...(gemPrice !== undefined ? { gemPrice } : {}),
+    ...(goldPrice !== undefined ? { goldPrice } : {}),
+    id: itemID,
+    maxStack,
+    nameDisplay,
+    rarity,
+    sellPrice,
+    subType: subTypeName,
+    type: typeName,
+    visualKey,
+  };
+}
+
+function buildItemCatalogFromProject(project, sourceProject) {
+  const itemsData = readGlobalVariable(project, "items_data");
+
+  assertCondition(
+    itemsData.type === "structure" && Array.isArray(itemsData.children),
+    "Global variable items_data must have type structure.",
+  );
+
+  const definitions = {};
+  const typeStructures = requireCatalogStructureChildren(
+    itemsData,
+    "Global variable items_data",
+  );
+
+  for (const typeStructure of typeStructures) {
+    const typeName = typeStructure.name;
+    const subTypeStructures = requireCatalogStructureChildren(
+      typeStructure,
+      `Global variable items_data.${typeName}`,
+    );
+
+    for (const subTypeStructure of subTypeStructures) {
+      const subTypeName = subTypeStructure.name;
+      const itemStructures = requireCatalogStructureChildren(
+        subTypeStructure,
+        `Global variable items_data.${typeName}.${subTypeName}`,
+      );
+
+      for (const itemStructure of itemStructures) {
+        const itemID = itemStructure.name;
+
+        assertCondition(
+          !Object.prototype.hasOwnProperty.call(definitions, itemID),
+          `Duplicate item ID in items_data: ${itemID}. Item IDs must be globally unique.`,
+        );
+
+        definitions[itemID] = readItemDefinitionFromGDevelop(
+          itemStructure,
+          typeName,
+          subTypeName,
+        );
+      }
+    }
+  }
+
+  assertCondition(
+    Object.keys(definitions).length > 0,
+    "Global variable items_data contains no item definitions.",
+  );
+
+  return {
+    catalogSchemaVersion: ITEM_CATALOG_SCHEMA_VERSION,
+    definitions,
+    exporterVersion: EXPORTER_VERSION,
+    source: {
+      project: sourceProject,
+    },
+  };
+}
+
+function assertItemVisualObjectsExist(project, itemCatalog) {
+  const globalObjects = Array.isArray(project.objects) ? project.objects : [];
+
+  for (const itemID of Object.keys(itemCatalog.definitions).sort(compareStrings)) {
+    const visualObjects = globalObjects.filter((object) => object?.name === itemID);
+
+    assertCondition(
+      visualObjects.length === 1,
+      `Item ${itemID} must have exactly one global visual object named ${itemID}.`,
+    );
+
+    const visualObject = visualObjects[0];
+
+    assertCondition(
+      visualObject.type === "Sprite",
+      `Global item visual object ${itemID} must be a Sprite.`,
+    );
+    assertCondition(
+      Array.isArray(visualObject.animations) &&
+        visualObject.animations.length > 0,
+      `Global item visual object ${itemID} must contain an animation.`,
+    );
+    assertCondition(
+      visualObject.animations[0]?.name === itemID,
+      `Global item visual object ${itemID} must use ${itemID} as its first animation name.`,
+    );
+    assertCondition(
+      visualObject.animations[0]?.directions?.some(
+        (direction) =>
+          Array.isArray(direction?.sprites) && direction.sprites.length > 0,
+      ),
+      `Global item visual object ${itemID} must contain at least one sprite frame.`,
+    );
+  }
+}
+
+function assertMonsterDropItemsExist(monsterCatalog, itemCatalog) {
+  const knownItemIDs = new Set(Object.keys(itemCatalog.definitions));
+
+  for (const [monsterType, monsterDefinition] of Object.entries(
+    monsterCatalog.definitions,
+  )) {
+    if (!monsterDefinition.drops) {
+      continue;
+    }
+
+    for (const rarity of monsterDefinition.drops.rarities) {
+      for (const item of rarity.items) {
+        assertCondition(
+          knownItemIDs.has(item.itemID),
+          `${monsterType}.Drops references unknown item ${item.itemID}. Add it to Global variable items_data before exporting.`,
+        );
+      }
+    }
+  }
+}
+
 function createAnchorWorldBody(anchor, bodyProfile) {
   const worldPolygons = bodyProfile.movementBody.originRelativePolygons.map((polygon) =>
     polygon.map((point) => ({
@@ -3083,6 +3393,44 @@ export function buildMonsterCatalog({ projectPath }) {
   return catalog;
 }
 
+export function buildItemCatalog({ projectPath }) {
+  assertCondition(
+    typeof projectPath === "string" && projectPath.length > 0,
+    "A canonical GDevelop project path is required.",
+  );
+
+  const absoluteProjectPath = resolve(projectPath);
+
+  assertCondition(existsSync(absoluteProjectPath), `Canonical project is missing: ${projectPath}`);
+  assertCondition(
+    basename(absoluteProjectPath) === EXPECTED_PROJECT_FILE,
+    `Only ${EXPECTED_PROJECT_FILE} may be used as the canonical source.`,
+  );
+
+  const projectBytes = readFileSync(absoluteProjectPath);
+  const normalizedProjectBytes = normalizeJsonSourceBytes(projectBytes);
+  const project = parseJson(projectBytes, EXPECTED_PROJECT_FILE);
+
+  assertCondition(
+    project.firstLayout === EXPECTED_FIRST_LAYOUT,
+    `firstLayout must remain ${EXPECTED_FIRST_LAYOUT}.`,
+  );
+
+  const sourceProject = {
+    file: EXPECTED_PROJECT_FILE,
+    sha256: sha256(normalizedProjectBytes),
+    sizeBytes: normalizedProjectBytes.length,
+  };
+  const catalog = buildItemCatalogFromProject(project, sourceProject);
+
+  assertItemVisualObjectsExist(project, catalog);
+
+  validateJsonValue(catalog);
+  assertNoAbsolutePaths(catalog);
+
+  return catalog;
+}
+
 function escapeXml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -3344,10 +3692,14 @@ function runCli(argv) {
   const secondArtifact = buildWorldArtifact({ projectPath });
   const firstMonsterCatalog = buildMonsterCatalog({ projectPath });
   const secondMonsterCatalog = buildMonsterCatalog({ projectPath });
+  const firstItemCatalog = buildItemCatalog({ projectPath });
+  const secondItemCatalog = buildItemCatalog({ projectPath });
   const generatedText = serializeWorldArtifact(firstArtifact);
   const repeatedText = serializeWorldArtifact(secondArtifact);
   const generatedMonsterCatalogText = serializeMonsterCatalog(firstMonsterCatalog);
   const repeatedMonsterCatalogText = serializeMonsterCatalog(secondMonsterCatalog);
+  const generatedItemCatalogText = serializeItemCatalog(firstItemCatalog);
+  const repeatedItemCatalogText = serializeItemCatalog(secondItemCatalog);
 
   assertCondition(
     generatedText === repeatedText,
@@ -3357,6 +3709,12 @@ function runCli(argv) {
     generatedMonsterCatalogText === repeatedMonsterCatalogText,
     "Monster catalog output is unstable for unchanged source bytes.",
   );
+  assertCondition(
+    generatedItemCatalogText === repeatedItemCatalogText,
+    "Item catalog output is unstable for unchanged source bytes.",
+  );
+
+  assertMonsterDropItemsExist(firstMonsterCatalog, firstItemCatalog);
 
   if (options.check) {
     assertCondition(existsSync(outputPath), `Committed artifact is missing: ${outputPath}`);
@@ -3370,8 +3728,18 @@ function runCli(argv) {
         readFileSync(DEFAULT_MONSTER_CATALOG_PATH, "utf8"),
       "The committed monster catalog is stale. Run the exporter and review the diff.",
     );
+    assertCondition(
+      existsSync(DEFAULT_ITEM_CATALOG_PATH),
+      `Committed item catalog is missing: ${DEFAULT_ITEM_CATALOG_PATH}`,
+    );
+    assertCondition(
+      generatedItemCatalogText ===
+        readFileSync(DEFAULT_ITEM_CATALOG_PATH, "utf8"),
+      "The committed item catalog is stale. Run the exporter and review the diff.",
+    );
     console.log(`World artifact is current: ${outputPath}`);
     console.log(`Monster catalog is current: ${DEFAULT_MONSTER_CATALOG_PATH}`);
+    console.log(`Item catalog is current: ${DEFAULT_ITEM_CATALOG_PATH}`);
   } else {
     mkdirSync(dirname(outputPath), { recursive: true });
     writeFileSync(outputPath, generatedText, "utf8");
@@ -3381,8 +3749,15 @@ function runCli(argv) {
       generatedMonsterCatalogText,
       "utf8",
     );
+    mkdirSync(dirname(DEFAULT_ITEM_CATALOG_PATH), { recursive: true });
+    writeFileSync(
+      DEFAULT_ITEM_CATALOG_PATH,
+      generatedItemCatalogText,
+      "utf8",
+    );
     console.log(`World artifact exported: ${outputPath}`);
     console.log(`Monster catalog exported: ${DEFAULT_MONSTER_CATALOG_PATH}`);
+    console.log(`Item catalog exported: ${DEFAULT_ITEM_CATALOG_PATH}`);
   }
 
   if (svgPath) {

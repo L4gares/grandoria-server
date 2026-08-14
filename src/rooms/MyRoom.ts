@@ -81,6 +81,15 @@ type SetInventoryOrderMessage = {
   RequestID?: unknown;
 };
 
+type BuyItemMessage = {
+  itemID?: unknown;
+  itemId?: unknown;
+  currency?: unknown;
+  Currency?: unknown;
+  requestId?: unknown;
+  RequestID?: unknown;
+};
+
 type SetMaxHealthMessage = {
   maxHealth?: unknown;
   MaxHP?: unknown;
@@ -154,6 +163,11 @@ type AuthenticatedPlayer = {
 
   inventory: InventorySlotData[];
 
+  currencies: {
+    gold: number;
+    gem: number;
+  };
+
   resources: {
     currentHealth: number;
     maxHealth: number;
@@ -177,6 +191,8 @@ type EquipmentSlotData = {
 type InventorySlotData = EquipmentSlotData & {
   quantity: number;
 };
+
+type CurrencyName = "Gold" | "Gem";
 
 type Hitbox = {
   minX: number;
@@ -277,14 +293,14 @@ const MONSTER_SPAWN_RETRY_DELAY_MS = 1_000;
 
 /*
  * Four frames at 0.08 seconds each:
- * 4 × 0.08 = 0.32 seconds.
+ * 4 Ã— 0.08 = 0.32 seconds.
  */
 const ATTACK_DURATION_MS = 320;
 
 /*
  * The attack hitbox becomes active only
  * on the fourth animation frame:
- * 3 × 0.08 = 0.24 seconds.
+ * 3 Ã— 0.08 = 0.24 seconds.
  */
 const ATTACK_HIT_DELAY_MS = 240;
 
@@ -669,6 +685,23 @@ function readEquipmentSlotName(value: unknown): EquipmentSlotName | null {
   }
 }
 
+function readCurrencyName(value: unknown): CurrencyName | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  switch (value.trim().toLowerCase()) {
+    case "gold":
+      return "Gold";
+
+    case "gem":
+      return "Gem";
+
+    default:
+      return null;
+  }
+}
+
 function getEquipmentSlot(
   player: PlayerState,
   slot: EquipmentSlotName,
@@ -773,6 +806,7 @@ export class MyRoom extends Room<{
     let authenticatedLocation: AuthenticatedPlayer["location"] | null = null;
     let authenticatedEquipment: AuthenticatedPlayer["equipment"] | null = null;
     let authenticatedInventory: AuthenticatedPlayer["inventory"] | null = null;
+    let authenticatedCurrencies: AuthenticatedPlayer["currencies"] | null = null;
     let authenticatedResources: AuthenticatedPlayer["resources"] | null = null;
 
     try {
@@ -805,6 +839,31 @@ export class MyRoom extends Room<{
   authenticatedInventory = readInventoryData(
     characterData.Inventory ?? characterData.inventory,
   );
+
+  const currenciesData = readObject(
+    characterData.Currencies ?? characterData.currencies,
+  );
+
+  authenticatedCurrencies = {
+    gold: Math.max(
+      0,
+      Math.trunc(
+        readFiniteNumberFromAliases(
+          [currenciesData.Gold, currenciesData.gold],
+          0,
+        ),
+      ),
+    ),
+    gem: Math.max(
+      0,
+      Math.trunc(
+        readFiniteNumberFromAliases(
+          [currenciesData.Gem, currenciesData.gem],
+          0,
+        ),
+      ),
+    ),
+  };
 
   const resourcesData = readObject(
     characterData.Resources ?? characterData.resources,
@@ -923,6 +982,7 @@ if (
   !authenticatedLocation ||
   !authenticatedEquipment ||
   !authenticatedInventory ||
+  !authenticatedCurrencies ||
   !authenticatedResources
 ) {
   console.warn(
@@ -941,6 +1001,7 @@ if (
       location: authenticatedLocation,
       equipment: authenticatedEquipment,
       inventory: authenticatedInventory,
+      currencies: authenticatedCurrencies,
       resources: authenticatedResources,
     };
   }
@@ -998,6 +1059,11 @@ if (
   private readonly monstersPendingRespawnIdleTick = new Set<string>();
 
   private readonly completedDropRequests = new Map<
+    string,
+    Map<string, Record<string, unknown>>
+  >();
+
+  private readonly completedPurchaseRequests = new Map<
     string,
     Map<string, Record<string, unknown>>
   >();
@@ -1093,6 +1159,10 @@ if (
 
     set_equipment: async (client: Client, message: SetEquipmentMessage) => {
       await this.handleSetEquipmentRequest(client, message);
+    },
+
+    buy_item: async (client: Client, message?: BuyItemMessage) => {
+      await this.handleBuyItemRequest(client, message);
     },
 
     drop_item: async (client: Client, message?: DropItemMessage) => {
@@ -1265,6 +1335,30 @@ if (
       });
   }
 
+  private async persistPlayerInventoryAndCurrencies(
+    client: Client,
+    player: PlayerState,
+  ) {
+    const identity = this.playerIdentities.get(client.sessionId);
+
+    if (!identity) {
+      throw new Error("PLAYER_IDENTITY_MISSING");
+    }
+
+    await firebaseAdminFirestore
+      .collection("users")
+      .doc(identity.playerUid)
+      .collection("characters")
+      .doc(identity.characterId)
+      .update({
+        Inventory: this.readPlayerInventory(player),
+        Currencies: {
+          Gold: player.gold,
+          Gem: player.gem,
+        },
+      });
+  }
+
   private readPlayerEquipment(
     player: PlayerState,
   ): Record<EquipmentSlotName, EquipmentSlotData> {
@@ -1310,6 +1404,201 @@ if (
         Inventory: this.readPlayerInventory(player),
         Equipment: this.readPlayerEquipment(player),
       });
+  }
+
+  private async handleBuyItemRequest(
+    client: Client,
+    message?: BuyItemMessage,
+  ) {
+    const messageData = readObject(message);
+    const requestId = readSafeStringFromAliases(
+      [messageData.requestId, messageData.RequestID],
+      MAX_ITEM_REQUEST_ID_LENGTH,
+    );
+    const itemID = readSafeStringFromAliases(
+      [messageData.itemID, messageData.itemId],
+      128,
+    );
+    const currency = readCurrencyName(
+      messageData.currency ?? messageData.Currency,
+    );
+    const player = this.state.players.get(client.sessionId);
+
+    if (!requestId || !itemID || !currency || !player) {
+      client.send("buy_item_result", {
+        code: "INVALID_REQUEST",
+        ok: false,
+        requestId,
+      });
+      return;
+    }
+
+    const previousResult = this.completedPurchaseRequests
+      .get(client.sessionId)
+      ?.get(requestId);
+
+    if (previousResult) {
+      client.send("buy_item_result", {
+        ...previousResult,
+        gem: player.gem,
+        gold: player.gold,
+        inventory: this.readPlayerInventory(player),
+      });
+      return;
+    }
+
+    const definition = getItemDefinition(itemID);
+
+    if (!definition) {
+      client.send("buy_item_result", {
+        code: "UNKNOWN_ITEM",
+        itemID,
+        ok: false,
+        requestId,
+      });
+      return;
+    }
+
+    const price =
+      currency === "Gold"
+        ? definition.goldPrice
+        : definition.gemPrice;
+
+    if (typeof price !== "number" || !Number.isFinite(price) || price < 0) {
+      client.send("buy_item_result", {
+        code: "ITEM_NOT_SOLD_FOR_CURRENCY",
+        currency,
+        itemID,
+        ok: false,
+        requestId,
+      });
+      return;
+    }
+
+    const balance = currency === "Gold" ? player.gold : player.gem;
+
+    if (balance < price) {
+      client.send("buy_item_result", {
+        code: "INSUFFICIENT_FUNDS",
+        currency,
+        gem: player.gem,
+        gold: player.gold,
+        inventory: this.readPlayerInventory(player),
+        itemID,
+        ok: false,
+        price,
+        requestId,
+      });
+      return;
+    }
+
+    if (this.playerInventoryOperations.has(client.sessionId)) {
+      client.send("buy_item_result", {
+        code: "INVENTORY_BUSY",
+        currency,
+        gem: player.gem,
+        gold: player.gold,
+        inventory: this.readPlayerInventory(player),
+        itemID,
+        ok: false,
+        requestId,
+      });
+      return;
+    }
+
+    this.playerInventoryOperations.add(client.sessionId);
+
+    const inventoryBefore = this.readPlayerInventory(player);
+    const goldBefore = player.gold;
+    const gemBefore = player.gem;
+
+    if (!this.addInventoryItem(player, itemID, 1)) {
+      this.restorePlayerInventory(player, inventoryBefore);
+      this.playerInventoryOperations.delete(client.sessionId);
+
+      client.send("buy_item_result", {
+        code: "INVENTORY_FULL",
+        currency,
+        gem: player.gem,
+        gold: player.gold,
+        inventory: this.readPlayerInventory(player),
+        itemID,
+        ok: false,
+        requestId,
+      });
+      return;
+    }
+
+    if (currency === "Gold") {
+      player.gold -= price;
+    } else {
+      player.gem -= price;
+    }
+
+    try {
+      await this.persistPlayerInventoryAndCurrencies(client, player);
+    } catch (error) {
+      this.restorePlayerInventory(player, inventoryBefore);
+      player.gold = goldBefore;
+      player.gem = gemBefore;
+
+      client.send("buy_item_result", {
+        code: "PURCHASE_SAVE_FAILED",
+        currency,
+        gem: player.gem,
+        gold: player.gold,
+        inventory: this.readPlayerInventory(player),
+        itemID,
+        ok: false,
+        requestId,
+      });
+
+      console.error("[Grandoria] Purchase save failed:", error);
+      return;
+    } finally {
+      this.playerInventoryOperations.delete(client.sessionId);
+    }
+
+    const result: Record<string, unknown> = {
+      code: "ITEM_PURCHASED",
+      currency,
+      gem: player.gem,
+      gold: player.gold,
+      inventory: this.readPlayerInventory(player),
+      itemID,
+      ok: true,
+      price,
+      requestId,
+    };
+
+    let sessionRequests = this.completedPurchaseRequests.get(client.sessionId);
+
+    if (!sessionRequests) {
+      sessionRequests = new Map();
+      this.completedPurchaseRequests.set(client.sessionId, sessionRequests);
+    }
+
+    sessionRequests.set(requestId, result);
+
+    while (sessionRequests.size > 64) {
+      const oldestRequestId = sessionRequests.keys().next().value;
+
+      if (typeof oldestRequestId !== "string") {
+        break;
+      }
+
+      sessionRequests.delete(oldestRequestId);
+    }
+
+    client.send("buy_item_result", result);
+
+    console.log("[Grandoria] Item purchased and persisted:", {
+      currency,
+      itemID,
+      price,
+      requestId,
+      sessionId: client.sessionId,
+    });
   }
 
   private async handleSetEquipmentRequest(
@@ -3893,6 +4182,10 @@ if (
 
     player.isAlive = player.currentHealth > 0;
 
+    player.gold = authenticatedPlayer.currencies.gold;
+
+    player.gem = authenticatedPlayer.currencies.gem;
+
     player.appearance.Sex = readAppearanceValue(
       appearanceOptions.Sex ?? appearanceOptions.sex,
       "Male",
@@ -4054,6 +4347,7 @@ if (
   this.playerAttackTargets.delete(client.sessionId);
   this.playerRespawnRemaining.delete(client.sessionId);
   this.completedDropRequests.delete(client.sessionId);
+  this.completedPurchaseRequests.delete(client.sessionId);
   this.playerInventoryOperations.delete(client.sessionId);
 
   this.state.players.delete(client.sessionId);

@@ -1,0 +1,110 @@
+{
+  "catalogSchemaVersion": 1,
+  "definitions": {
+    "black_sword_01": {
+      "attributes": {
+        "max_damage": 10,
+        "min_damage": 6
+      },
+      "gemPrice": 3,
+      "goldPrice": 80,
+      "id": "black_sword_01",
+      "maxStack": 1,
+      "nameDisplay": "Black Sword",
+      "rarity": "Common",
+      "sellPrice": 50,
+      "subType": "Sword",
+      "type": "Weapons",
+      "visualKey": "black_iron_01"
+    },
+    "iron_sword_01": {
+      "attributes": {
+        "max_damage": 7,
+        "min_damage": 5
+      },
+      "gemPrice": 2,
+      "goldPrice": 50,
+      "id": "iron_sword_01",
+      "maxStack": 1,
+      "nameDisplay": "Iron Sword",
+      "rarity": "Common",
+      "sellPrice": 20,
+      "subType": "Sword",
+      "type": "Weapons",
+      "visualKey": "sword_iron_01"
+    },
+    "item_test": {
+      "attributes": {},
+      "gemPrice": 0,
+      "goldPrice": 20,
+      "id": "item_test",
+      "maxStack": 7,
+      "nameDisplay": "Teste Item",
+      "rarity": "Common",
+      "sellPrice": 10,
+      "subType": "Test Items",
+      "type": "Materials",
+      "visualKey": "item_test"
+    },
+    "purple_chest": {
+      "attributes": {
+        "armor": 25
+      },
+      "gemPrice": 8,
+      "goldPrice": 320,
+      "id": "purple_chest",
+      "maxStack": 1,
+      "nameDisplay": "Purple Chest",
+      "rarity": "Common",
+      "sellPrice": 150,
+      "subType": "Warrior Chest",
+      "type": "Tronco",
+      "visualKey": "purple_chest"
+    },
+    "purple_helmet": {
+      "attributes": {
+        "armor": 10
+      },
+      "gemPrice": 5,
+      "goldPrice": 240,
+      "id": "purple_helmet",
+      "maxStack": 1,
+      "nameDisplay": "Purple Helmet",
+      "rarity": "Common",
+      "sellPrice": 100,
+      "subType": "Warrior Helmet",
+      "type": "Head",
+      "visualKey": "purple_helmet"
+    },
+    "rabbit_foot": {
+      "attributes": {},
+      "id": "rabbit_foot",
+      "maxStack": 4,
+      "nameDisplay": "Rabbit Foot",
+      "rarity": "Common",
+      "sellPrice": 3,
+      "subType": "Monster Parts",
+      "type": "Materials",
+      "visualKey": "rabbit_foot"
+    },
+    "rabbit_skin": {
+      "attributes": {},
+      "id": "rabbit_skin",
+      "maxStack": 10,
+      "nameDisplay": "Rabbit Skin",
+      "rarity": "Common",
+      "sellPrice": 5,
+      "subType": "Monster Parts",
+      "type": "Materials",
+      "visualKey": "rabbit_skin"
+    }
+  },
+  "exporterVersion": 1,
+  "source": {
+    "project": {
+      "file": "RPG-2D-project-Grandoria-Colyseus-authoritative-inventory-equipment.json",
+      "sha256": "3a900ad39b1b3f78593deb53caf1162683da4733f80e82b1d4fc60c612d1dbb5",
+      "sizeBytes": 5781531
+    }
+  }
+}
