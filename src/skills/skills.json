@@ -1,0 +1,32 @@
+{
+  "catalogSchemaVersion": 1,
+  "definitions": {
+    "skill_heal_basic": {
+      "availableToAll": true,
+      "castTimeMs": 0,
+      "cooldownMs": 30000,
+      "effects": {
+        "heal_percent_max_hp": 20
+      },
+      "enabled": true,
+      "id": "skill_heal_basic",
+      "nameDisplay": "Basic Heal",
+      "resourceCost": 0,
+      "resourceType": "none",
+      "scaling": {
+        "attribute": "none",
+        "perPoint": 0
+      },
+      "target": "self",
+      "type": "healing"
+    }
+  },
+  "exporterVersion": 1,
+  "source": {
+    "project": {
+      "file": "RPG-2D-project-Grandoria-Colyseus-authoritative-inventory-equipment.json",
+      "sha256": "5e4c1a90a7d23232a548581a325e62eec174ab9e35dde3c3f0e5113e3656193d",
+      "sizeBytes": 5789515
+    }
+  }
+}

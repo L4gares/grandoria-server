@@ -53,6 +53,77 @@ export class PlayerEquipmentState extends Schema {
   OffHand = new PlayerEquipmentSlotState();
 }
 
+
+export class PlayerAttributeValuesState extends Schema {
+  @type("number")
+  AttackPower: number = 0;
+
+  @type("number")
+  MagicPower: number = 0;
+
+  @type("number")
+  HealingPower: number = 0;
+
+  @type("number")
+  Agility: number = 0;
+
+  @type("number")
+  Vitality: number = 0;
+
+  @type("number")
+  Regeneration: number = 0;
+
+  @type("number")
+  Armor: number = 0;
+
+  @type("number")
+  CriticalChance: number = 0;
+}
+
+export class PlayerAttributesState extends Schema {
+  @type(PlayerAttributeValuesState)
+  Base = new PlayerAttributeValuesState();
+
+  @type(PlayerAttributeValuesState)
+  Allocated = new PlayerAttributeValuesState();
+
+  @type(PlayerAttributeValuesState)
+  Final = new PlayerAttributeValuesState();
+}
+
+
+export class PlayerCombatStatsState extends Schema {
+  @type("number")
+  weaponMinDamage: number = 0;
+
+  @type("number")
+  weaponMaxDamage: number = 0;
+
+  @type("number")
+  physicalDamageBonus: number = 0;
+
+  @type("number")
+  magicDamageBonus: number = 0;
+
+  @type("number")
+  healingBonus: number = 0;
+
+  @type("number")
+  attackSpeedBonus: number = 0;
+
+  @type("number")
+  maxHealthBonus: number = 0;
+
+  @type("number")
+  healthRegenPerSecond: number = 0;
+
+  @type("number")
+  armor: number = 0;
+
+  @type("number")
+  criticalChancePercent: number = 0;
+}
+
 export class PlayerInventorySlotState extends Schema {
   @type("string")
   id: string = "empty";
@@ -95,6 +166,9 @@ export class PlayerState extends Schema {
   @type("number")
   maxHealth: number = 50;
 
+  @type("number")
+  attackIntervalMs: number = 0;
+
   @type("boolean")
   isAlive: boolean = true;
 
@@ -103,6 +177,24 @@ export class PlayerState extends Schema {
 
   @type("number")
   gem: number = 0;
+
+  @type("number")
+  level: number = 1;
+
+  @type("number")
+  experience: number = 0;
+
+  @type("number")
+  experienceToNextLevel: number = 100;
+
+  @type("number")
+  unspentAttributePoints: number = 0;
+
+  @type(PlayerAttributesState)
+  attributes = new PlayerAttributesState();
+
+  @type(PlayerCombatStatsState)
+  combatStats = new PlayerCombatStatsState();
 
   @type(PlayerAppearanceState)
   appearance = new PlayerAppearanceState();

@@ -16,6 +16,7 @@ import {
   MyRoomState,
   MonsterState,
   PlayerState,
+  PlayerAttributeValuesState,
   PlayerEquipmentSlotState,
   PlayerInventorySlotState,
   WorldItemState,
@@ -24,6 +25,11 @@ import {
 import {
   getItemDefinition,
 } from "../items/ItemCatalog.js";
+
+import {
+  getSkillDefinition,
+  getSkillEffectNumber,
+} from "../skills/SkillCatalog.js";
 
 import {
   getMonsterDefinition,
@@ -90,9 +96,11 @@ type BuyItemMessage = {
   RequestID?: unknown;
 };
 
-type SetMaxHealthMessage = {
-  maxHealth?: unknown;
-  MaxHP?: unknown;
+type SellItemMessage = {
+  itemID?: unknown;
+  itemId?: unknown;
+  quantity?: unknown;
+  Quantity?: unknown;
   requestId?: unknown;
   RequestID?: unknown;
 };
@@ -142,15 +150,49 @@ type SetEquipmentMessage = {
   value?: unknown;
 };
 
+type AllocateAttributesMessage = {
+  requestId?: unknown;
+  RequestID?: unknown;
+  allocations?: unknown;
+  Allocations?: unknown;
+};
+
+type SkillUseMessage = {
+  requestId?: unknown;
+  RequestID?: unknown;
+  skillID?: unknown;
+  skillId?: unknown;
+  SkillID?: unknown;
+};
+
 type PlayerIdentity = {
   playerUid: string;
   characterId: string;
   mapId: string;
 };
 
+type PlayerAttributeValues = {
+  AttackPower: number;
+  MagicPower: number;
+  HealingPower: number;
+  Agility: number;
+  Vitality: number;
+  Regeneration: number;
+  Armor: number;
+  CriticalChance: number;
+};
+
 type AuthenticatedPlayer = {
   uid: string;
   characterId: string;
+  level: number;
+  experience: number;
+  unspentAttributePoints: number;
+  attributes: {
+    Base: PlayerAttributeValues;
+    Allocated: PlayerAttributeValues;
+    Final: PlayerAttributeValues;
+  };
 
   location: {
     mapId: string;
@@ -172,6 +214,8 @@ type AuthenticatedPlayer = {
     currentHealth: number;
     maxHealth: number;
   };
+
+  skillCooldowns: Record<string, number>;
 };
 
 type EquipmentSlotName =
@@ -190,6 +234,19 @@ type EquipmentSlotData = {
 
 type InventorySlotData = EquipmentSlotData & {
   quantity: number;
+};
+
+type PlayerCombatStats = {
+  weaponMinDamage: number;
+  weaponMaxDamage: number;
+  physicalDamageBonus: number;
+  magicDamageBonus: number;
+  healingBonus: number;
+  attackSpeedBonus: number;
+  maxHealthBonus: number;
+  healthRegenPerSecond: number;
+  armor: number;
+  criticalChancePercent: number;
 };
 
 type CurrencyName = "Gold" | "Gem";
@@ -292,25 +349,79 @@ const MONSTER_PATROL_DIRECTIONS: readonly MonsterDirection[] = [
 const MONSTER_SPAWN_RETRY_DELAY_MS = 1_000;
 
 /*
- * Four frames at 0.08 seconds each:
- * 4 Ã— 0.08 = 0.32 seconds.
+ * The current attack animation itself still has four frames at 0.08 seconds
+ * each, so the visual/hit phase lasts 320 ms. This is intentionally separate
+ * from the interval between accepted attacks.
  */
-const ATTACK_DURATION_MS = 320;
+const ATTACK_ANIMATION_DURATION_MS = 320;
 
 /*
- * The attack hitbox becomes active only
- * on the fourth animation frame:
- * 3 Ã— 0.08 = 0.24 seconds.
+ * The attack hitbox becomes active only on the fourth animation frame:
+ * 3 × 0.08 = 0.24 seconds.
  */
 const ATTACK_HIT_DELAY_MS = 240;
 
-const ATTACK_HIT_REMAINING_MS = ATTACK_DURATION_MS - ATTACK_HIT_DELAY_MS;
+const ATTACK_HIT_REMAINING_MS =
+  ATTACK_ANIMATION_DURATION_MS - ATTACK_HIT_DELAY_MS;
 
 /*
- * Matches the current character.damage
- * value in the GDevelop project.
+ * Base attack cadence. The base interval is 1500 ms.
+ * Agility adds attacks per second through attackSpeedBonus, while the
+ * animation duration remains the absolute minimum interval.
  */
-const PLAYER_ATTACK_DAMAGE = 1;
+const PLAYER_MIN_ATTACK_INTERVAL_MS = ATTACK_ANIMATION_DURATION_MS;
+const PLAYER_BASE_ATTACK_INTERVAL_MS = Math.max(
+  1_500,
+  PLAYER_MIN_ATTACK_INTERVAL_MS,
+);
+
+/*
+ * Base damage used when the character has no weapon equipped.
+ * Equipped weapons replace this base with their catalog min/max damage.
+ */
+const PLAYER_UNARMED_DAMAGE = 1;
+
+const ATTACK_POWER_DAMAGE_PER_POINT = 0.5;
+const MAGIC_POWER_PER_POINT = 0.7;
+const HEALING_POWER_PER_POINT = 0.5;
+const AGILITY_ATTACKS_PER_SECOND_PER_POINT = 0.01;
+const VITALITY_HP_PER_POINT = 2;
+const PLAYER_MAX_HEALTH_LEVEL_GROWTH = 1.08;
+const REGENERATION_HP_PER_SECOND_PER_POINT = 0.2;
+
+/*
+ * Regeneration keeps the same HP-per-second strength, but is applied in
+ * discrete authoritative ticks every 2 seconds.
+ */
+const PLAYER_HEALTH_REGEN_TICK_MS = 2_000;
+const ARMOR_PER_POINT = 0.8;
+const ARMOR_DAMAGE_REDUCTION_CONSTANT = 100;
+const CRITICAL_CHANCE_PERCENT_PER_POINT = 0.3;
+const PHYSICAL_CRITICAL_DAMAGE_MULTIPLIER = 2;
+
+const PLAYER_XP_BASE = 100;
+
+const PLAYER_XP_GROWTH = 1.25;
+
+const PLAYER_ATTRIBUTE_POINTS_PER_LEVEL = 2;
+
+const PLAYER_MAX_LEVEL = 30;
+
+function getExperienceRequiredForLevel(level: number) {
+  const safeLevel = Math.max(1, Math.trunc(level));
+
+  if (safeLevel >= PLAYER_MAX_LEVEL) {
+    return 0;
+  }
+
+  return Math.max(
+    1,
+    Math.ceil(
+      PLAYER_XP_BASE *
+        Math.pow(PLAYER_XP_GROWTH, safeLevel - 1),
+    ),
+  );
+}
 
 /*
  * Additional server-side safety limit.
@@ -376,6 +487,25 @@ function readObject(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function readPersistedSkillCooldowns(value: unknown): Record<string, number> {
+  const source = readObject(value);
+  const result: Record<string, number> = {};
+
+  for (const [skillID, rawValue] of Object.entries(source)) {
+    if (!/^[A-Za-z0-9_-]+$/.test(skillID)) {
+      continue;
+    }
+
+    const cooldownEndsAt = readFiniteNumber(rawValue, 0);
+
+    if (cooldownEndsAt > 0) {
+      result[skillID] = cooldownEndsAt;
+    }
+  }
+
+  return result;
+}
+
 function readFirstDefined(
   source: Record<string, unknown>,
   keys: string[],
@@ -412,6 +542,166 @@ function readFiniteNumberFromAliases(
   return fallback;
 }
 
+function readNonNegativeIntegerFromAliases(
+  values: unknown[],
+  fallback = 0,
+): number {
+  const value = readFiniteNumberFromAliases(values, Number.NaN);
+
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+
+  const result = Math.trunc(value);
+
+  if (!Number.isSafeInteger(result) || result < 0) {
+    return fallback;
+  }
+
+  return result;
+}
+
+function readPlayerAttributeValues(value: unknown): PlayerAttributeValues {
+  const source = readObject(value);
+
+  return {
+    AttackPower: readNonNegativeIntegerFromAliases(
+      [source.AttackPower, source.attackPower],
+    ),
+    MagicPower: readNonNegativeIntegerFromAliases(
+      [source.MagicPower, source.magicPower],
+    ),
+    HealingPower: readNonNegativeIntegerFromAliases(
+      [source.HealingPower, source.healingPower],
+    ),
+    Agility: readNonNegativeIntegerFromAliases(
+      [source.Agility, source.agility],
+    ),
+    Vitality: readNonNegativeIntegerFromAliases(
+      [source.Vitality, source.vitality],
+    ),
+    Regeneration: readNonNegativeIntegerFromAliases(
+      [source.Regeneration, source.regeneration],
+    ),
+    Armor: readNonNegativeIntegerFromAliases(
+      [source.Armor, source.armor],
+    ),
+    CriticalChance: readNonNegativeIntegerFromAliases(
+      [source.CriticalChance, source.criticalChance],
+    ),
+  };
+}
+
+function addPlayerAttributeValues(
+  first: Readonly<PlayerAttributeValues>,
+  second: Readonly<PlayerAttributeValues>,
+): PlayerAttributeValues {
+  return {
+    AttackPower: first.AttackPower + second.AttackPower,
+    MagicPower: first.MagicPower + second.MagicPower,
+    HealingPower: first.HealingPower + second.HealingPower,
+    Agility: first.Agility + second.Agility,
+    Vitality: first.Vitality + second.Vitality,
+    Regeneration: first.Regeneration + second.Regeneration,
+    Armor: first.Armor + second.Armor,
+    CriticalChance: first.CriticalChance + second.CriticalChance,
+  };
+}
+
+function applyPlayerAttributeValues(
+  target: PlayerAttributeValuesState,
+  source: Readonly<PlayerAttributeValues>,
+) {
+  target.AttackPower = source.AttackPower;
+  target.MagicPower = source.MagicPower;
+  target.HealingPower = source.HealingPower;
+  target.Agility = source.Agility;
+  target.Vitality = source.Vitality;
+  target.Regeneration = source.Regeneration;
+  target.Armor = source.Armor;
+  target.CriticalChance = source.CriticalChance;
+}
+
+function readStrictNonNegativeInteger(value: unknown): number | null {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    !Number.isSafeInteger(value) ||
+    value < 0
+  ) {
+    return null;
+  }
+
+  return value;
+}
+
+function readAttributeAllocationValues(
+  value: unknown,
+): PlayerAttributeValues | null {
+  const source = readObject(value);
+
+  const read = (
+    primary: string,
+    secondary: string,
+  ): number | null => {
+    const rawValue = readFirstDefined(source, [primary, secondary]);
+
+    if (rawValue === undefined) {
+      return 0;
+    }
+
+    return readStrictNonNegativeInteger(rawValue);
+  };
+
+  const AttackPower = read("AttackPower", "attackPower");
+  const MagicPower = read("MagicPower", "magicPower");
+  const HealingPower = read("HealingPower", "healingPower");
+  const Agility = read("Agility", "agility");
+  const Vitality = read("Vitality", "vitality");
+  const Regeneration = read("Regeneration", "regeneration");
+  const Armor = read("Armor", "armor");
+  const CriticalChance = read("CriticalChance", "criticalChance");
+
+  if (
+    AttackPower === null ||
+    MagicPower === null ||
+    HealingPower === null ||
+    Agility === null ||
+    Vitality === null ||
+    Regeneration === null ||
+    Armor === null ||
+    CriticalChance === null
+  ) {
+    return null;
+  }
+
+  return {
+    AttackPower,
+    MagicPower,
+    HealingPower,
+    Agility,
+    Vitality,
+    Regeneration,
+    Armor,
+    CriticalChance,
+  };
+}
+
+function sumPlayerAttributeValues(
+  values: Readonly<PlayerAttributeValues>,
+): number {
+  return (
+    values.AttackPower +
+    values.MagicPower +
+    values.HealingPower +
+    values.Agility +
+    values.Vitality +
+    values.Regeneration +
+    values.Armor +
+    values.CriticalChance
+  );
+}
+
 function readPositiveInteger(value: unknown): number | null {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return null;
@@ -420,6 +710,18 @@ function readPositiveInteger(value: unknown): number | null {
   const result = Math.trunc(value);
 
   return result > 0 ? result : null;
+}
+
+function readStrictPositiveInteger(value: unknown): number | null {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value <= 0
+  ) {
+    return null;
+  }
+
+  return value;
 }
 
 function readDirectionFromAliases(values: unknown[]): string {
@@ -685,6 +987,209 @@ function readEquipmentSlotName(value: unknown): EquipmentSlotName | null {
   }
 }
 
+function readItemAttributeNumber(
+  attributes: Readonly<Record<string, unknown>>,
+  aliases: readonly string[],
+): number {
+  for (const alias of aliases) {
+    const value = attributes[alias];
+
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return Math.max(0, value);
+    }
+  }
+
+  return 0;
+}
+
+function roundCombatNumber(value: number): number {
+  return Math.round(value * 10_000) / 10_000;
+}
+
+function createEmptyPlayerAttributeValues(): PlayerAttributeValues {
+  return {
+    AttackPower: 0,
+    MagicPower: 0,
+    HealingPower: 0,
+    Agility: 0,
+    Vitality: 0,
+    Regeneration: 0,
+    Armor: 0,
+    CriticalChance: 0,
+  };
+}
+
+function readEquipmentAttributePointBonuses(
+  player: PlayerState,
+): PlayerAttributeValues {
+  const bonuses = createEmptyPlayerAttributeValues();
+
+  for (const slotName of [
+    "Head",
+    "Tronco",
+    "Legs",
+    "Foots",
+    "Weapons",
+    "OffHand",
+  ] as const) {
+    const slot = getEquipmentSlot(player, slotName);
+
+    if (slot.id === "empty") {
+      continue;
+    }
+
+    const definition = getItemDefinition(slot.id);
+
+    if (!definition) {
+      continue;
+    }
+
+    const attributes = definition.attributes;
+
+    bonuses.AttackPower += readItemAttributeNumber(attributes, [
+      "attack_power",
+      "AttackPower",
+      "attackPower",
+    ]);
+    bonuses.MagicPower += readItemAttributeNumber(attributes, [
+      "magic_power",
+      "MagicPower",
+      "magicPower",
+    ]);
+    bonuses.HealingPower += readItemAttributeNumber(attributes, [
+      "healing_power",
+      "HealingPower",
+      "healingPower",
+    ]);
+    bonuses.Agility += readItemAttributeNumber(attributes, [
+      "agility",
+      "Agility",
+    ]);
+    bonuses.Vitality += readItemAttributeNumber(attributes, [
+      "vitality",
+      "Vitality",
+    ]);
+    bonuses.Regeneration += readItemAttributeNumber(attributes, [
+      "regeneration",
+      "Regeneration",
+    ]);
+    bonuses.Armor += readItemAttributeNumber(attributes, [
+      "attribute_armor",
+      "armor_attribute",
+      "ArmorPoints",
+    ]);
+    bonuses.CriticalChance += readItemAttributeNumber(attributes, [
+      "critical_chance",
+      "CriticalChance",
+      "criticalChance",
+    ]);
+  }
+
+  return bonuses;
+}
+
+function readDirectEquipmentArmor(player: PlayerState): number {
+  let armor = 0;
+
+  for (const slotName of [
+    "Head",
+    "Tronco",
+    "Legs",
+    "Foots",
+    "Weapons",
+    "OffHand",
+  ] as const) {
+    const slot = getEquipmentSlot(player, slotName);
+
+    if (slot.id === "empty") {
+      continue;
+    }
+
+    const definition = getItemDefinition(slot.id);
+
+    if (!definition) {
+      continue;
+    }
+
+    armor += readItemAttributeNumber(definition.attributes, ["armor"]);
+  }
+
+  return armor;
+}
+
+function readEquippedWeaponDamage(player: PlayerState): {
+  minDamage: number;
+  maxDamage: number;
+} {
+  const weaponID = player.equipment.Weapons.id;
+
+  if (weaponID === "empty") {
+    return { minDamage: 0, maxDamage: 0 };
+  }
+
+  const definition = getItemDefinition(weaponID);
+
+  if (!definition || definition.type !== "Weapons") {
+    return { minDamage: 0, maxDamage: 0 };
+  }
+
+  const minDamage = readItemAttributeNumber(definition.attributes, [
+    "min_damage",
+    "minDamage",
+  ]);
+  const maxDamage = readItemAttributeNumber(definition.attributes, [
+    "max_damage",
+    "maxDamage",
+  ]);
+
+  return {
+    minDamage: Math.min(minDamage, maxDamage),
+    maxDamage: Math.max(minDamage, maxDamage),
+  };
+}
+
+function calculatePlayerCombatStats(player: PlayerState): PlayerCombatStats {
+  const finalAttributes = readPlayerAttributeValues(player.attributes.Final);
+  const equipmentAttributeBonuses = readEquipmentAttributePointBonuses(player);
+  const effectiveAttributes = addPlayerAttributeValues(
+    finalAttributes,
+    equipmentAttributeBonuses,
+  );
+  const weaponDamage = readEquippedWeaponDamage(player);
+  const directEquipmentArmor = readDirectEquipmentArmor(player);
+
+  return {
+    weaponMinDamage: roundCombatNumber(weaponDamage.minDamage),
+    weaponMaxDamage: roundCombatNumber(weaponDamage.maxDamage),
+    physicalDamageBonus: roundCombatNumber(
+      effectiveAttributes.AttackPower * ATTACK_POWER_DAMAGE_PER_POINT,
+    ),
+    magicDamageBonus: roundCombatNumber(
+      effectiveAttributes.MagicPower * MAGIC_POWER_PER_POINT,
+    ),
+    healingBonus: roundCombatNumber(
+      effectiveAttributes.HealingPower * HEALING_POWER_PER_POINT,
+    ),
+    attackSpeedBonus: roundCombatNumber(
+      effectiveAttributes.Agility * AGILITY_ATTACKS_PER_SECOND_PER_POINT,
+    ),
+    maxHealthBonus: roundCombatNumber(
+      effectiveAttributes.Vitality * VITALITY_HP_PER_POINT,
+    ),
+    healthRegenPerSecond: roundCombatNumber(
+      effectiveAttributes.Regeneration *
+        REGENERATION_HP_PER_SECOND_PER_POINT,
+    ),
+    armor: roundCombatNumber(
+      effectiveAttributes.Armor * ARMOR_PER_POINT + directEquipmentArmor,
+    ),
+    criticalChancePercent: roundCombatNumber(
+      effectiveAttributes.CriticalChance *
+        CRITICAL_CHANCE_PERCENT_PER_POINT,
+    ),
+  };
+}
+
 function readCurrencyName(value: unknown): CurrencyName | null {
   if (typeof value !== "string") {
     return null;
@@ -808,6 +1313,11 @@ export class MyRoom extends Room<{
     let authenticatedInventory: AuthenticatedPlayer["inventory"] | null = null;
     let authenticatedCurrencies: AuthenticatedPlayer["currencies"] | null = null;
     let authenticatedResources: AuthenticatedPlayer["resources"] | null = null;
+    let authenticatedSkillCooldowns: Record<string, number> = {};
+    let authenticatedLevel = 1;
+    let authenticatedExperience = 0;
+    let authenticatedUnspentAttributePoints = 0;
+    let authenticatedAttributes: AuthenticatedPlayer["attributes"] | null = null;
 
     try {
   const characterSnapshot =
@@ -831,6 +1341,41 @@ export class MyRoom extends Room<{
 
   const characterData =
     readObject(characterSnapshot.data());
+
+  const attributesData = readObject(
+    characterData.Attributes ?? characterData.attributes,
+  );
+  const baseAttributes = readPlayerAttributeValues(
+    attributesData.Base ?? attributesData.base,
+  );
+  const allocatedAttributes = readPlayerAttributeValues(
+    attributesData.Allocated ?? attributesData.allocated,
+  );
+
+  authenticatedLevel = Math.max(
+    1,
+    readNonNegativeIntegerFromAliases(
+      [characterData.Level, characterData.level],
+      1,
+    ),
+  );
+  authenticatedExperience =
+    readNonNegativeIntegerFromAliases(
+      [characterData.Experience, characterData.experience],
+      0,
+    );
+  authenticatedUnspentAttributePoints =
+    readNonNegativeIntegerFromAliases(
+      [
+        characterData.UnspentAttributePoints,
+        characterData.unspentAttributePoints,
+      ],
+    );
+  authenticatedAttributes = {
+    Base: baseAttributes,
+    Allocated: allocatedAttributes,
+    Final: addPlayerAttributeValues(baseAttributes, allocatedAttributes),
+  };
 
   authenticatedEquipment = readEquipmentData(
     characterData.Equipment ?? characterData.equipment,
@@ -898,6 +1443,10 @@ export class MyRoom extends Room<{
     currentHealth,
     maxHealth,
   };
+
+  authenticatedSkillCooldowns = readPersistedSkillCooldowns(
+    characterData.SkillCooldowns ?? characterData.skillCooldowns,
+  );
 
   const locationData =
     readObject(
@@ -983,7 +1532,8 @@ if (
   !authenticatedEquipment ||
   !authenticatedInventory ||
   !authenticatedCurrencies ||
-  !authenticatedResources
+  !authenticatedResources ||
+  !authenticatedAttributes
 ) {
   console.warn(
     "[Grandoria] Authentication rejected: persistent character data is missing.",
@@ -998,11 +1548,16 @@ if (
     return {
       uid: authenticatedUid,
       characterId,
+      level: authenticatedLevel,
+      experience: authenticatedExperience,
+      unspentAttributePoints: authenticatedUnspentAttributePoints,
+      attributes: authenticatedAttributes,
       location: authenticatedLocation,
       equipment: authenticatedEquipment,
       inventory: authenticatedInventory,
       currencies: authenticatedCurrencies,
       resources: authenticatedResources,
+      skillCooldowns: authenticatedSkillCooldowns,
     };
   }
 
@@ -1023,6 +1578,8 @@ if (
    * independently for each session.
    */
   private readonly playerAttackRemaining = new Map<string, number>();
+
+  private readonly playerAttackCooldownRemaining = new Map<string, number>();
 
   /*
    * Stores the requested target for the
@@ -1068,7 +1625,52 @@ if (
     Map<string, Record<string, unknown>>
   >();
 
+  private readonly completedSaleRequests = new Map<
+    string,
+    Map<string, Record<string, unknown>>
+  >();
+
+  private readonly completedAttributeAllocationRequests = new Map<
+    string,
+    Map<string, Record<string, unknown>>
+  >();
+
+  private readonly completedSkillUseRequests = new Map<
+    string,
+    Map<string, Record<string, unknown>>
+  >();
+
+  private readonly playerSkillCooldowns = new Map<
+    string,
+    Map<string, number>
+  >();
+
+  private readonly playerSkillOperations = new Set<string>();
+
+  private readonly skillNow = () => Date.now();
+
   private readonly playerInventoryOperations = new Set<string>();
+
+  private readonly playerAttributeOperations = new Set<string>();
+
+  private readonly playerProgressionOperations = new Set<string>();
+
+  private readonly playerHealthRegenStates = new Map<
+    string,
+    {
+      elapsedMs: number;
+      fractionalHealth: number;
+    }
+  >();
+
+  private readonly pendingExperienceAwards = new Map<
+    string,
+    {
+      amount: number;
+      monsterId: string;
+      monsterType: string;
+    }
+  >();
 
   private readonly monsterSpawnsById = new Map<string, MonsterSpawn>();
 
@@ -1116,16 +1718,39 @@ if (
         return;
       }
 
-      console.log(`Attack received: ${client.sessionId}`);
       /*
-       * Prevents repeated messages from
-       * restarting or speeding up the attack.
+       * The 320 ms animation/hit phase and the attack interval are separate.
+       * Repeated client messages are ignored until the authoritative cooldown
+       * expires.
        */
-      if (this.playerAttackRemaining.has(client.sessionId)) {
+      const cooldownRemaining =
+        this.playerAttackCooldownRemaining.get(client.sessionId) ?? 0;
+
+      if (
+        this.playerAttackRemaining.has(client.sessionId) ||
+        cooldownRemaining > 0
+      ) {
         return;
       }
 
-      this.playerAttackRemaining.set(client.sessionId, ATTACK_DURATION_MS);
+      const attackIntervalMs = this.calculatePlayerAttackIntervalMs(player);
+
+      player.attackIntervalMs = attackIntervalMs;
+
+      this.playerAttackRemaining.set(
+        client.sessionId,
+        ATTACK_ANIMATION_DURATION_MS,
+      );
+      this.playerAttackCooldownRemaining.set(
+        client.sessionId,
+        attackIntervalMs,
+      );
+
+      console.log("[Grandoria] Player attack accepted:", {
+        sessionId: client.sessionId,
+        attackIntervalMs,
+        attackSpeedBonus: player.combatStats.attackSpeedBonus,
+      });
 
       const attackData = readObject(message);
 
@@ -1165,6 +1790,25 @@ if (
       await this.handleBuyItemRequest(client, message);
     },
 
+    sell_item: async (client: Client, message?: SellItemMessage) => {
+      await this.handleSellItemRequest(client, message);
+    },
+
+    allocate_attributes: async (
+      client: Client,
+      message?: AllocateAttributesMessage,
+    ) => {
+      await this.handleAllocateAttributesRequest(client, message);
+    },
+
+    use_skill: async (client: Client, message?: SkillUseMessage) => {
+      await this.handleSkillUseRequest(client, message);
+    },
+
+    request_skill_cooldowns: (client: Client) => {
+      this.sendPlayerSkillCooldownState(client);
+    },
+
     drop_item: async (client: Client, message?: DropItemMessage) => {
       await this.handleDropItemRequest(client, message);
     },
@@ -1180,9 +1824,6 @@ if (
       await this.handleSetInventoryOrderRequest(client, message);
     },
 
-    set_max_health: async (client: Client, message?: SetMaxHealthMessage) => {
-      await this.handleSetMaxHealthRequest(client, message);
-    },
   };
 
   onCreate() {
@@ -1359,6 +2000,199 @@ if (
       });
   }
 
+  private readPlayerCombatStats(player: PlayerState): PlayerCombatStats {
+    return {
+      weaponMinDamage: player.combatStats.weaponMinDamage,
+      weaponMaxDamage: player.combatStats.weaponMaxDamage,
+      physicalDamageBonus: player.combatStats.physicalDamageBonus,
+      magicDamageBonus: player.combatStats.magicDamageBonus,
+      healingBonus: player.combatStats.healingBonus,
+      attackSpeedBonus: player.combatStats.attackSpeedBonus,
+      maxHealthBonus: player.combatStats.maxHealthBonus,
+      healthRegenPerSecond: player.combatStats.healthRegenPerSecond,
+      armor: player.combatStats.armor,
+      criticalChancePercent: player.combatStats.criticalChancePercent,
+    };
+  }
+
+  private recalculatePlayerCombatStats(player: PlayerState): PlayerCombatStats {
+    const stats = calculatePlayerCombatStats(player);
+
+    player.combatStats.weaponMinDamage = stats.weaponMinDamage;
+    player.combatStats.weaponMaxDamage = stats.weaponMaxDamage;
+    player.combatStats.physicalDamageBonus = stats.physicalDamageBonus;
+    player.combatStats.magicDamageBonus = stats.magicDamageBonus;
+    player.combatStats.healingBonus = stats.healingBonus;
+    player.combatStats.attackSpeedBonus = stats.attackSpeedBonus;
+    player.combatStats.maxHealthBonus = stats.maxHealthBonus;
+    player.combatStats.healthRegenPerSecond = stats.healthRegenPerSecond;
+    player.combatStats.armor = stats.armor;
+    player.combatStats.criticalChancePercent = stats.criticalChancePercent;
+    player.attackIntervalMs = this.calculatePlayerAttackIntervalMs(player);
+
+    return stats;
+  }
+
+  private calculatePlayerAttackIntervalMs(player: PlayerState): number {
+    const attackSpeedBonus =
+      Number.isFinite(player.combatStats.attackSpeedBonus)
+        ? Math.max(0, player.combatStats.attackSpeedBonus)
+        : 0;
+
+    const baseAttacksPerSecond =
+      1000 / PLAYER_BASE_ATTACK_INTERVAL_MS;
+
+    const attacksPerSecond =
+      baseAttacksPerSecond + attackSpeedBonus;
+
+    const intervalMs =
+      attacksPerSecond > 0
+        ? 1000 / attacksPerSecond
+        : PLAYER_BASE_ATTACK_INTERVAL_MS;
+
+    return Math.max(
+      PLAYER_MIN_ATTACK_INTERVAL_MS,
+      Math.round(intervalMs),
+    );
+  }
+
+  private calculateAuthoritativeMaxHealth(player: PlayerState): number {
+    const safeLevel = Math.max(
+      1,
+      Math.min(PLAYER_MAX_LEVEL, Math.trunc(player.level)),
+    );
+    const baseWithVitality = Math.max(
+      1,
+      DEFAULT_PLAYER_MAX_HEALTH + player.combatStats.maxHealthBonus,
+    );
+
+    return Math.max(
+      1,
+      Math.ceil(
+        baseWithVitality *
+          Math.pow(PLAYER_MAX_HEALTH_LEVEL_GROWTH, safeLevel - 1),
+      ),
+    );
+  }
+
+  private recalculatePlayerMaxHealth(player: PlayerState) {
+    const previousMaxHealth = player.maxHealth;
+    const previousCurrentHealth = player.currentHealth;
+    const maxHealth = this.calculateAuthoritativeMaxHealth(player);
+
+    player.maxHealth = maxHealth;
+    player.currentHealth = Math.max(
+      0,
+      Math.min(player.currentHealth, player.maxHealth),
+    );
+    player.isAlive = player.currentHealth > 0;
+
+    return {
+      changed: previousMaxHealth !== player.maxHealth,
+      currentHealth: player.currentHealth,
+      maxHealth: player.maxHealth,
+      previousCurrentHealth,
+      previousMaxHealth,
+    };
+  }
+
+  private rollPlayerPhysicalAttackDamage(
+    player: PlayerState,
+    weaponRandomValue = Math.random(),
+    criticalRandomValue = Math.random(),
+  ) {
+    const weaponEquipped =
+      player.equipment.Weapons.id !== "empty" &&
+      player.combatStats.weaponMaxDamage > 0;
+
+    const minDamage = weaponEquipped
+      ? Math.max(0, player.combatStats.weaponMinDamage)
+      : PLAYER_UNARMED_DAMAGE;
+    const maxDamage = weaponEquipped
+      ? Math.max(minDamage, player.combatStats.weaponMaxDamage)
+      : PLAYER_UNARMED_DAMAGE;
+
+    const safeWeaponRandom = Math.min(
+      0.999999999999,
+      Math.max(
+        0,
+        Number.isFinite(weaponRandomValue) ? weaponRandomValue : 0,
+      ),
+    );
+    const integerMinDamage = Math.ceil(minDamage);
+    const integerMaxDamage = Math.floor(maxDamage);
+    const weaponRoll =
+      integerMaxDamage >= integerMinDamage
+        ? integerMinDamage +
+          Math.floor(
+            safeWeaponRandom *
+              (integerMaxDamage - integerMinDamage + 1),
+          )
+        : minDamage;
+    const physicalDamageBonus = Math.max(
+      0,
+      player.combatStats.physicalDamageBonus,
+    );
+    const baseDamage = Math.max(
+      1,
+      roundCombatNumber(weaponRoll + physicalDamageBonus),
+    );
+
+    const criticalChancePercent = Math.min(
+      100,
+      Math.max(0, player.combatStats.criticalChancePercent),
+    );
+    const safeCriticalRandom = Math.min(
+      0.999999999999,
+      Math.max(
+        0,
+        Number.isFinite(criticalRandomValue) ? criticalRandomValue : 0,
+      ),
+    );
+    const criticalRollPercent = safeCriticalRandom * 100;
+    const isCritical =
+      criticalChancePercent > 0 &&
+      criticalRollPercent < criticalChancePercent;
+    const criticalMultiplier = isCritical
+      ? PHYSICAL_CRITICAL_DAMAGE_MULTIPLIER
+      : 1;
+    const damage = Math.max(
+      1,
+      roundCombatNumber(baseDamage * criticalMultiplier),
+    );
+
+    return {
+      baseDamage,
+      criticalChancePercent: roundCombatNumber(criticalChancePercent),
+      criticalMultiplier,
+      criticalRoll: roundCombatNumber(criticalRollPercent),
+      damage,
+      isCritical,
+      physicalDamageBonus: roundCombatNumber(physicalDamageBonus),
+      weaponID: weaponEquipped ? player.equipment.Weapons.id : "unarmed",
+      weaponRoll: roundCombatNumber(weaponRoll),
+    };
+  }
+
+  private calculatePhysicalDamageAfterArmor(
+    rawDamage: number,
+    armor: number,
+  ) {
+    const safeRawDamage = Math.max(0, Number.isFinite(rawDamage) ? rawDamage : 0);
+    const safeArmor = Math.max(0, Number.isFinite(armor) ? armor : 0);
+    const damageReduction =
+      safeArmor / (safeArmor + ARMOR_DAMAGE_REDUCTION_CONSTANT);
+    const reducedDamage = safeRawDamage * (1 - damageReduction);
+    const damage = Math.max(1, Math.round(reducedDamage));
+
+    return {
+      armor: roundCombatNumber(safeArmor),
+      damage,
+      damageReductionPercent: roundCombatNumber(damageReduction * 100),
+      rawDamage: roundCombatNumber(safeRawDamage),
+    };
+  }
+
   private readPlayerEquipment(
     player: PlayerState,
   ): Record<EquipmentSlotName, EquipmentSlotData> {
@@ -1403,7 +2237,541 @@ if (
       .update({
         Inventory: this.readPlayerInventory(player),
         Equipment: this.readPlayerEquipment(player),
+        "Resources.CurrentHP": Math.max(
+          0,
+          Math.min(player.currentHealth, player.maxHealth),
+        ),
+        "Resources.MaxHP": player.maxHealth,
       });
+  }
+
+  private readPlayerAllocatedAttributes(
+    player: PlayerState,
+  ): PlayerAttributeValues {
+    return readPlayerAttributeValues(player.attributes.Allocated);
+  }
+
+  private readPlayerBaseAttributes(
+    player: PlayerState,
+  ): PlayerAttributeValues {
+    return readPlayerAttributeValues(player.attributes.Base);
+  }
+
+  private readPlayerFinalAttributes(
+    player: PlayerState,
+  ): PlayerAttributeValues {
+    return readPlayerAttributeValues(player.attributes.Final);
+  }
+
+  private async persistPlayerAttributes(
+    client: Client,
+    player: PlayerState,
+  ) {
+    const identity = this.playerIdentities.get(client.sessionId);
+
+    if (!identity) {
+      throw new Error("PLAYER_IDENTITY_MISSING");
+    }
+
+    await firebaseAdminFirestore
+      .collection("users")
+      .doc(identity.playerUid)
+      .collection("characters")
+      .doc(identity.characterId)
+      .update({
+        "Attributes.Allocated": this.readPlayerAllocatedAttributes(player),
+        UnspentAttributePoints: player.unspentAttributePoints,
+        "Resources.CurrentHP": Math.max(
+          0,
+          Math.min(player.currentHealth, player.maxHealth),
+        ),
+        "Resources.MaxHP": player.maxHealth,
+      });
+  }
+
+  private async handleAllocateAttributesRequest(
+    client: Client,
+    message?: AllocateAttributesMessage,
+  ) {
+    const messageData = readObject(message);
+    const requestId = readSafeStringFromAliases(
+      [messageData.requestId, messageData.RequestID],
+      MAX_ITEM_REQUEST_ID_LENGTH,
+    );
+    const allocations = readAttributeAllocationValues(
+      messageData.allocations ?? messageData.Allocations,
+    );
+    const player = this.state.players.get(client.sessionId);
+
+    if (!requestId || !allocations || !player) {
+      client.send("allocate_attributes_result", {
+        code: "INVALID_REQUEST",
+        ok: false,
+        requestId,
+      });
+      return;
+    }
+
+    const totalSpent = sumPlayerAttributeValues(allocations);
+
+    if (totalSpent <= 0) {
+      client.send("allocate_attributes_result", {
+        code: "NO_POINTS_REQUESTED",
+        ok: false,
+        requestId,
+        unspentAttributePoints: player.unspentAttributePoints,
+      });
+      return;
+    }
+
+    const previousResult = this.completedAttributeAllocationRequests
+      .get(client.sessionId)
+      ?.get(requestId);
+
+    if (previousResult) {
+      client.send("allocate_attributes_result", {
+        ...previousResult,
+        allocated: this.readPlayerAllocatedAttributes(player),
+        final: this.readPlayerFinalAttributes(player),
+        unspentAttributePoints: player.unspentAttributePoints,
+      });
+      return;
+    }
+
+    if (
+      this.playerAttributeOperations.has(client.sessionId) ||
+      this.playerProgressionOperations.has(client.sessionId)
+    ) {
+      client.send("allocate_attributes_result", {
+        code: "ATTRIBUTES_BUSY",
+        ok: false,
+        requestId,
+        unspentAttributePoints: player.unspentAttributePoints,
+      });
+      return;
+    }
+
+    if (totalSpent > player.unspentAttributePoints) {
+      client.send("allocate_attributes_result", {
+        code: "INSUFFICIENT_ATTRIBUTE_POINTS",
+        ok: false,
+        requestId,
+        requestedPoints: totalSpent,
+        unspentAttributePoints: player.unspentAttributePoints,
+      });
+      return;
+    }
+
+    this.playerAttributeOperations.add(client.sessionId);
+
+    const allocatedBefore = this.readPlayerAllocatedAttributes(player);
+    const finalBefore = this.readPlayerFinalAttributes(player);
+    const unspentBefore = player.unspentAttributePoints;
+    const currentHealthBefore = player.currentHealth;
+    const maxHealthBefore = player.maxHealth;
+
+    const allocatedAfter = addPlayerAttributeValues(
+      allocatedBefore,
+      allocations,
+    );
+    const finalAfter = addPlayerAttributeValues(
+      this.readPlayerBaseAttributes(player),
+      allocatedAfter,
+    );
+
+    applyPlayerAttributeValues(
+      player.attributes.Allocated,
+      allocatedAfter,
+    );
+    applyPlayerAttributeValues(
+      player.attributes.Final,
+      finalAfter,
+    );
+    this.recalculatePlayerCombatStats(player);
+    this.recalculatePlayerMaxHealth(player);
+    player.unspentAttributePoints -= totalSpent;
+
+    try {
+      await this.persistPlayerAttributes(client, player);
+    } catch (error) {
+      applyPlayerAttributeValues(
+        player.attributes.Allocated,
+        allocatedBefore,
+      );
+      applyPlayerAttributeValues(
+        player.attributes.Final,
+        finalBefore,
+      );
+      this.recalculatePlayerCombatStats(player);
+      player.currentHealth = currentHealthBefore;
+      player.maxHealth = maxHealthBefore;
+      player.isAlive = player.currentHealth > 0;
+      player.unspentAttributePoints = unspentBefore;
+
+      client.send("allocate_attributes_result", {
+        allocated: this.readPlayerAllocatedAttributes(player),
+        code: "ATTRIBUTE_SAVE_FAILED",
+        final: this.readPlayerFinalAttributes(player),
+        ok: false,
+        requestId,
+        unspentAttributePoints: player.unspentAttributePoints,
+      });
+
+      console.error("[Grandoria] Attribute allocation save failed:", error);
+      return;
+    } finally {
+      this.playerAttributeOperations.delete(client.sessionId);
+      void this.flushPendingExperienceAward(client.sessionId);
+    }
+
+    const result: Record<string, unknown> = {
+      allocated: this.readPlayerAllocatedAttributes(player),
+      code: "ATTRIBUTES_ALLOCATED",
+      combatStats: this.readPlayerCombatStats(player),
+      currentHealth: player.currentHealth,
+      final: this.readPlayerFinalAttributes(player),
+      maxHealth: player.maxHealth,
+      ok: true,
+      requestId,
+      spentPoints: totalSpent,
+      unspentAttributePoints: player.unspentAttributePoints,
+    };
+
+    let sessionRequests =
+      this.completedAttributeAllocationRequests.get(client.sessionId);
+
+    if (!sessionRequests) {
+      sessionRequests = new Map();
+      this.completedAttributeAllocationRequests.set(
+        client.sessionId,
+        sessionRequests,
+      );
+    }
+
+    sessionRequests.set(requestId, result);
+
+    while (sessionRequests.size > 64) {
+      const oldestRequestId = sessionRequests.keys().next().value;
+
+      if (typeof oldestRequestId !== "string") {
+        break;
+      }
+
+      sessionRequests.delete(oldestRequestId);
+    }
+
+    client.send("allocate_attributes_result", result);
+
+    console.log(`[Grandoria] Attributes allocated and combat stats recalculated: ${client.sessionId}`, {
+      finalAttributes: this.readPlayerFinalAttributes(player),
+      combatStats: this.readPlayerCombatStats(player),
+      unspentAttributePoints: player.unspentAttributePoints,
+    });
+  }
+
+  private getPlayerSkillCooldownRemainingMs(
+    sessionId: string,
+    skillID: string,
+    now = this.skillNow(),
+  ): number {
+    const cooldownEndsAt =
+      this.playerSkillCooldowns.get(sessionId)?.get(skillID) ?? 0;
+
+    return Math.max(0, Math.ceil(cooldownEndsAt - now));
+  }
+
+  private sendPlayerSkillCooldownState(client: Client) {
+    const now = this.skillNow();
+    const sessionCooldowns = this.playerSkillCooldowns.get(client.sessionId);
+    const cooldowns: Record<string, number> = {};
+
+    if (sessionCooldowns) {
+      for (const [skillID, cooldownEndsAt] of sessionCooldowns) {
+        const remainingMs = Math.max(0, Math.ceil(cooldownEndsAt - now));
+
+        if (remainingMs > 0) {
+          cooldowns[skillID] = remainingMs;
+        } else {
+          sessionCooldowns.delete(skillID);
+        }
+      }
+
+      if (sessionCooldowns.size === 0) {
+        this.playerSkillCooldowns.delete(client.sessionId);
+      }
+    }
+
+    client.send("skill_cooldown_state", { cooldowns });
+  }
+
+  private async persistPlayerSkillUse(
+    client: Client,
+    player: PlayerState,
+    skillID: string,
+    cooldownEndsAt: number,
+  ) {
+    const identity = this.playerIdentities.get(client.sessionId);
+
+    if (!identity) {
+      throw new Error("PLAYER_IDENTITY_MISSING");
+    }
+
+    await firebaseAdminFirestore
+      .collection("users")
+      .doc(identity.playerUid)
+      .collection("characters")
+      .doc(identity.characterId)
+      .update({
+        [`SkillCooldowns.${skillID}`]: cooldownEndsAt,
+        "Resources.CurrentHP": Math.max(
+          0,
+          Math.min(player.currentHealth, player.maxHealth),
+        ),
+        "Resources.MaxHP": player.maxHealth,
+      });
+  }
+
+  private async handleSkillUseRequest(
+    client: Client,
+    message?: SkillUseMessage,
+  ) {
+    const messageData = readObject(message);
+    const requestId = readSafeStringFromAliases(
+      [messageData.requestId, messageData.RequestID],
+      MAX_ITEM_REQUEST_ID_LENGTH,
+    );
+    const skillID = readSafeStringFromAliases(
+      [messageData.skillID, messageData.skillId, messageData.SkillID],
+      128,
+    );
+    const player = this.state.players.get(client.sessionId);
+
+    if (!requestId || !skillID || !player) {
+      client.send("use_skill_result", {
+        code: "INVALID_REQUEST",
+        ok: false,
+        requestId,
+        skillID,
+      });
+      return;
+    }
+
+    const previousResult = this.completedSkillUseRequests
+      .get(client.sessionId)
+      ?.get(requestId);
+
+    if (previousResult) {
+      client.send("use_skill_result", {
+        ...previousResult,
+        cooldownRemainingMs: this.getPlayerSkillCooldownRemainingMs(
+          client.sessionId,
+          skillID,
+        ),
+        currentHealth: player.currentHealth,
+        maxHealth: player.maxHealth,
+      });
+      return;
+    }
+
+    const definition = getSkillDefinition(skillID);
+
+    if (!definition || !definition.enabled || !definition.availableToAll) {
+      client.send("use_skill_result", {
+        code: "SKILL_UNAVAILABLE",
+        ok: false,
+        requestId,
+        skillID,
+      });
+      return;
+    }
+
+    if (!player.isAlive || player.currentHealth <= 0) {
+      client.send("use_skill_result", {
+        code: "PLAYER_UNAVAILABLE",
+        ok: false,
+        requestId,
+        skillID,
+      });
+      return;
+    }
+
+    const now = this.skillNow();
+    const cooldownRemainingMs = this.getPlayerSkillCooldownRemainingMs(
+      client.sessionId,
+      skillID,
+      now,
+    );
+
+    if (cooldownRemainingMs > 0) {
+      client.send("use_skill_result", {
+        code: "SKILL_ON_COOLDOWN",
+        cooldownMs: definition.cooldownMs,
+        cooldownRemainingMs,
+        ok: false,
+        requestId,
+        skillID,
+      });
+      return;
+    }
+
+    if (this.playerSkillOperations.has(client.sessionId)) {
+      client.send("use_skill_result", {
+        code: "SKILL_BUSY",
+        ok: false,
+        requestId,
+        skillID,
+      });
+      return;
+    }
+
+    if (player.currentHealth >= player.maxHealth) {
+      client.send("use_skill_result", {
+        code: "HEALTH_FULL",
+        cooldownRemainingMs: 0,
+        currentHealth: player.currentHealth,
+        maxHealth: player.maxHealth,
+        ok: false,
+        requestId,
+        skillID,
+      });
+      return;
+    }
+
+    const healPercentMaxHP = getSkillEffectNumber(
+      definition,
+      "heal_percent_max_hp",
+    );
+
+    if (
+      definition.type !== "healing" ||
+      definition.target !== "self" ||
+      definition.resourceType !== "none" ||
+      definition.resourceCost !== 0 ||
+      definition.scaling.attribute.toLowerCase() !== "none" ||
+      definition.scaling.perPoint !== 0 ||
+      !Number.isFinite(healPercentMaxHP) ||
+      healPercentMaxHP! <= 0
+    ) {
+      client.send("use_skill_result", {
+        code: "UNSUPPORTED_SKILL_CONFIG",
+        ok: false,
+        requestId,
+        skillID,
+      });
+      return;
+    }
+
+    const previousHealth = player.currentHealth;
+    const previousCooldownEndsAt =
+      this.playerSkillCooldowns.get(client.sessionId)?.get(skillID);
+    const configuredHealAmount = Math.max(
+      1,
+      Math.floor(player.maxHealth * (healPercentMaxHP! / 100)),
+    );
+    const healAmount = Math.min(
+      configuredHealAmount,
+      player.maxHealth - player.currentHealth,
+    );
+    const cooldownEndsAt = now + definition.cooldownMs;
+
+    this.playerSkillOperations.add(client.sessionId);
+
+    player.currentHealth = Math.min(
+      player.maxHealth,
+      player.currentHealth + healAmount,
+    );
+
+    let sessionCooldowns = this.playerSkillCooldowns.get(client.sessionId);
+
+    if (!sessionCooldowns) {
+      sessionCooldowns = new Map();
+      this.playerSkillCooldowns.set(client.sessionId, sessionCooldowns);
+    }
+
+    sessionCooldowns.set(skillID, cooldownEndsAt);
+
+    if (player.currentHealth >= player.maxHealth) {
+      this.playerHealthRegenStates.delete(client.sessionId);
+    }
+
+    try {
+      await this.persistPlayerSkillUse(
+        client,
+        player,
+        skillID,
+        cooldownEndsAt,
+      );
+    } catch (error) {
+      player.currentHealth = previousHealth;
+
+      if (previousCooldownEndsAt === undefined) {
+        sessionCooldowns.delete(skillID);
+      } else {
+        sessionCooldowns.set(skillID, previousCooldownEndsAt);
+      }
+
+      if (sessionCooldowns.size === 0) {
+        this.playerSkillCooldowns.delete(client.sessionId);
+      }
+
+      client.send("use_skill_result", {
+        code: "SKILL_SAVE_FAILED",
+        cooldownRemainingMs: 0,
+        currentHealth: player.currentHealth,
+        maxHealth: player.maxHealth,
+        ok: false,
+        requestId,
+        skillID,
+      });
+
+      console.error("[Grandoria] Skill use save failed:", error);
+      return;
+    } finally {
+      this.playerSkillOperations.delete(client.sessionId);
+    }
+
+    const result: Record<string, unknown> = {
+      code: "SKILL_USED",
+      cooldownEndsAt,
+      cooldownMs: definition.cooldownMs,
+      cooldownRemainingMs: definition.cooldownMs,
+      currentHealth: player.currentHealth,
+      healAmount,
+      maxHealth: player.maxHealth,
+      ok: true,
+      requestId,
+      skillID,
+    };
+
+    let sessionRequests = this.completedSkillUseRequests.get(client.sessionId);
+
+    if (!sessionRequests) {
+      sessionRequests = new Map();
+      this.completedSkillUseRequests.set(client.sessionId, sessionRequests);
+    }
+
+    sessionRequests.set(requestId, result);
+
+    while (sessionRequests.size > 64) {
+      const oldestRequestId = sessionRequests.keys().next().value;
+
+      if (typeof oldestRequestId !== "string") {
+        break;
+      }
+
+      sessionRequests.delete(oldestRequestId);
+    }
+
+    client.send("use_skill_result", result);
+
+    console.log("[Grandoria] Skill used and persisted:", {
+      cooldownMs: definition.cooldownMs,
+      currentHealth: player.currentHealth,
+      healAmount,
+      maxHealth: player.maxHealth,
+      sessionId: client.sessionId,
+      skillID,
+    });
   }
 
   private async handleBuyItemRequest(
@@ -1601,6 +2969,197 @@ if (
     });
   }
 
+  private async handleSellItemRequest(
+    client: Client,
+    message?: SellItemMessage,
+  ) {
+    const messageData = readObject(message);
+    const requestId = readSafeStringFromAliases(
+      [messageData.requestId, messageData.RequestID],
+      MAX_ITEM_REQUEST_ID_LENGTH,
+    );
+    const itemID = readSafeStringFromAliases(
+      [messageData.itemID, messageData.itemId],
+      128,
+    );
+    const quantity = readStrictPositiveInteger(
+      messageData.quantity ?? messageData.Quantity,
+    );
+    const player = this.state.players.get(client.sessionId);
+
+    if (!requestId || !itemID || quantity === null || !player) {
+      client.send("sell_item_result", {
+        code: quantity === null ? "INVALID_QUANTITY" : "INVALID_REQUEST",
+        gem: player?.gem,
+        gold: player?.gold,
+        inventory: player ? this.readPlayerInventory(player) : undefined,
+        itemID,
+        ok: false,
+        requestId,
+      });
+      return;
+    }
+
+    const previousResult = this.completedSaleRequests
+      .get(client.sessionId)
+      ?.get(requestId);
+
+    if (previousResult) {
+      client.send("sell_item_result", {
+        ...previousResult,
+        gem: player.gem,
+        gold: player.gold,
+        inventory: this.readPlayerInventory(player),
+      });
+      return;
+    }
+
+    const definition = getItemDefinition(itemID);
+
+    if (!definition) {
+      client.send("sell_item_result", {
+        code: "UNKNOWN_ITEM",
+        gem: player.gem,
+        gold: player.gold,
+        inventory: this.readPlayerInventory(player),
+        itemID,
+        ok: false,
+        quantity,
+        requestId,
+      });
+      return;
+    }
+
+    const unitPrice = definition.sellPrice;
+    const totalPrice = unitPrice * quantity;
+
+    if (
+      !Number.isFinite(unitPrice) ||
+      unitPrice < 0 ||
+      !Number.isFinite(totalPrice) ||
+      totalPrice < 0
+    ) {
+      client.send("sell_item_result", {
+        code: "INVALID_SELL_PRICE",
+        gem: player.gem,
+        gold: player.gold,
+        inventory: this.readPlayerInventory(player),
+        itemID,
+        ok: false,
+        quantity,
+        requestId,
+      });
+      return;
+    }
+
+    if (this.playerInventoryOperations.has(client.sessionId)) {
+      client.send("sell_item_result", {
+        code: "INVENTORY_BUSY",
+        gem: player.gem,
+        gold: player.gold,
+        inventory: this.readPlayerInventory(player),
+        itemID,
+        ok: false,
+        quantity,
+        requestId,
+      });
+      return;
+    }
+
+    this.playerInventoryOperations.add(client.sessionId);
+
+    const inventoryBefore = this.readPlayerInventory(player);
+    const goldBefore = player.gold;
+
+    if (!this.removeInventoryItem(player, itemID, quantity)) {
+      this.restorePlayerInventory(player, inventoryBefore);
+      this.playerInventoryOperations.delete(client.sessionId);
+
+      client.send("sell_item_result", {
+        code: "INSUFFICIENT_ITEM_QUANTITY",
+        gem: player.gem,
+        gold: player.gold,
+        inventory: this.readPlayerInventory(player),
+        itemID,
+        ok: false,
+        quantity,
+        requestId,
+        unitPrice,
+      });
+      return;
+    }
+
+    player.gold += totalPrice;
+
+    try {
+      await this.persistPlayerInventoryAndCurrencies(client, player);
+    } catch (error) {
+      this.restorePlayerInventory(player, inventoryBefore);
+      player.gold = goldBefore;
+
+      client.send("sell_item_result", {
+        code: "SALE_SAVE_FAILED",
+        gem: player.gem,
+        gold: player.gold,
+        inventory: this.readPlayerInventory(player),
+        itemID,
+        ok: false,
+        quantity,
+        requestId,
+        totalPrice,
+        unitPrice,
+      });
+
+      console.error("[Grandoria] Sale save failed:", error);
+      return;
+    } finally {
+      this.playerInventoryOperations.delete(client.sessionId);
+    }
+
+    const result: Record<string, unknown> = {
+      code: "ITEM_SOLD",
+      gem: player.gem,
+      gold: player.gold,
+      inventory: this.readPlayerInventory(player),
+      itemID,
+      ok: true,
+      quantity,
+      requestId,
+      totalPrice,
+      unitPrice,
+    };
+
+    let sessionRequests = this.completedSaleRequests.get(client.sessionId);
+
+    if (!sessionRequests) {
+      sessionRequests = new Map();
+      this.completedSaleRequests.set(client.sessionId, sessionRequests);
+    }
+
+    sessionRequests.set(requestId, result);
+
+    while (sessionRequests.size > 64) {
+      const oldestRequestId = sessionRequests.keys().next().value;
+
+      if (typeof oldestRequestId !== "string") {
+        break;
+      }
+
+      sessionRequests.delete(oldestRequestId);
+    }
+
+    client.send("sell_item_result", result);
+
+    console.log("[Grandoria] Item sold and persisted:", {
+      itemID,
+      quantity,
+      requestId,
+      sessionId: client.sessionId,
+      totalPrice,
+      unitPrice,
+    });
+  }
+
   private async handleSetEquipmentRequest(
     client: Client,
     message: SetEquipmentMessage,
@@ -1656,6 +3215,7 @@ if (
     if (currentEquipment.id === requestedEquipment.id) {
       client.send("set_equipment_result", {
         code: "NO_CHANGE",
+        combatStats: this.readPlayerCombatStats(player),
         equipment: currentEquipment,
         ok: true,
         requestId,
@@ -1685,6 +3245,8 @@ if (
     this.playerInventoryOperations.add(client.sessionId);
     const inventoryBefore = this.readPlayerInventory(player);
     const equipmentBefore = this.readPlayerEquipment(player);
+    const currentHealthBefore = player.currentHealth;
+    const maxHealthBefore = player.maxHealth;
 
     if (
       requestedEquipment.id !== "empty" &&
@@ -1725,12 +3287,18 @@ if (
             sub_type: requestedDefinition!.subType,
           },
     );
+    this.recalculatePlayerCombatStats(player);
+    this.recalculatePlayerMaxHealth(player);
 
     try {
       await this.persistPlayerInventoryAndEquipment(client, player);
     } catch (error) {
       this.restorePlayerInventory(player, inventoryBefore);
       this.restorePlayerEquipment(player, equipmentBefore);
+      this.recalculatePlayerCombatStats(player);
+      player.currentHealth = currentHealthBefore;
+      player.maxHealth = maxHealthBefore;
+      player.isAlive = player.currentHealth > 0;
       this.playerInventoryOperations.delete(client.sessionId);
 
       client.send("set_equipment_result", {
@@ -1751,8 +3319,11 @@ if (
 
     client.send("set_equipment_result", {
       code: "EQUIPMENT_UPDATED",
+      combatStats: this.readPlayerCombatStats(player),
+      currentHealth: player.currentHealth,
       equipment: savedEquipment,
       inventory: this.readPlayerInventory(player),
+      maxHealth: player.maxHealth,
       ok: true,
       requestId,
       slot: slotName,
@@ -1763,6 +3334,7 @@ if (
       id: savedEquipment.id,
       type: savedEquipment.type,
       sub_type: savedEquipment.sub_type,
+      combatStats: this.readPlayerCombatStats(player),
     });
   }
 
@@ -1983,99 +3555,6 @@ if (
     });
 
     console.log(`[Grandoria] Inventory order persisted: ${client.sessionId}`, {
-      requestId,
-    });
-  }
-
-  private async handleSetMaxHealthRequest(
-    client: Client,
-    message?: SetMaxHealthMessage,
-  ) {
-    const player = this.state.players.get(client.sessionId);
-    const identity = this.playerIdentities.get(client.sessionId);
-    const messageData = readObject(message);
-    const requestId = readSafeStringFromAliases(
-      [messageData.requestId, messageData.RequestID],
-      MAX_ITEM_REQUEST_ID_LENGTH,
-    );
-    const requestedMaxHealth = Math.trunc(
-      readFiniteNumberFromAliases(
-        [messageData.maxHealth, messageData.MaxHP],
-        Number.NaN,
-      ),
-    );
-
-    if (
-      !player ||
-      !identity ||
-      !requestId ||
-      !Number.isFinite(requestedMaxHealth) ||
-      requestedMaxHealth < 1 ||
-      requestedMaxHealth > 1_000_000
-    ) {
-      client.send("set_max_health_result", {
-        code: "INVALID_MAX_HEALTH",
-        ok: false,
-        requestId,
-      });
-      return;
-    }
-
-    if (requestedMaxHealth === player.maxHealth) {
-      client.send("set_max_health_result", {
-        code: "NO_CHANGE",
-        currentHealth: player.currentHealth,
-        maxHealth: player.maxHealth,
-        ok: true,
-        requestId,
-      });
-      return;
-    }
-
-    const previousMaxHealth = player.maxHealth;
-    const previousCurrentHealth = player.currentHealth;
-    player.maxHealth = requestedMaxHealth;
-    player.currentHealth = Math.min(player.currentHealth, player.maxHealth);
-    player.isAlive = player.currentHealth > 0;
-
-    try {
-      await firebaseAdminFirestore
-        .collection("users")
-        .doc(identity.playerUid)
-        .collection("characters")
-        .doc(identity.characterId)
-        .update({
-          "Resources.MaxHP": player.maxHealth,
-          "Resources.CurrentHP": player.currentHealth,
-        });
-    } catch (error) {
-      player.maxHealth = previousMaxHealth;
-      player.currentHealth = previousCurrentHealth;
-      player.isAlive = player.currentHealth > 0;
-
-      client.send("set_max_health_result", {
-        code: "MAX_HEALTH_SAVE_FAILED",
-        currentHealth: player.currentHealth,
-        maxHealth: player.maxHealth,
-        ok: false,
-        requestId,
-      });
-
-      console.error("[Grandoria] Max health save failed:", error);
-      return;
-    }
-
-    client.send("set_max_health_result", {
-      code: "MAX_HEALTH_UPDATED",
-      currentHealth: player.currentHealth,
-      maxHealth: player.maxHealth,
-      ok: true,
-      requestId,
-    });
-
-    console.log(`[Grandoria] Max health updated: ${client.sessionId}`, {
-      currentHealth: player.currentHealth,
-      maxHealth: player.maxHealth,
       requestId,
     });
   }
@@ -2771,6 +4250,93 @@ if (
     }
   }
 
+  private applyExperienceToPlayer(
+    player: PlayerState,
+    amount: number,
+  ) {
+    const safeAmount = Math.max(0, Math.trunc(amount));
+    const previousLevel = player.level;
+    const previousExperience = player.experience;
+    const previousUnspentAttributePoints =
+      player.unspentAttributePoints;
+
+    if (safeAmount === 0 || player.level >= PLAYER_MAX_LEVEL) {
+      player.experienceToNextLevel =
+        getExperienceRequiredForLevel(player.level);
+
+      return {
+        levelsGained: 0,
+        previousExperience,
+        previousLevel,
+        previousUnspentAttributePoints,
+      };
+    }
+
+    player.experience += safeAmount;
+
+    let levelsGained = 0;
+
+    while (player.level < PLAYER_MAX_LEVEL) {
+      const requiredExperience =
+        getExperienceRequiredForLevel(player.level);
+
+      if (
+        requiredExperience <= 0 ||
+        player.experience < requiredExperience
+      ) {
+        break;
+      }
+
+      player.experience -= requiredExperience;
+      player.level += 1;
+      player.unspentAttributePoints +=
+        PLAYER_ATTRIBUTE_POINTS_PER_LEVEL;
+      levelsGained += 1;
+    }
+
+    if (player.level >= PLAYER_MAX_LEVEL) {
+      player.level = PLAYER_MAX_LEVEL;
+      player.experience = 0;
+    }
+
+    player.experienceToNextLevel =
+      getExperienceRequiredForLevel(player.level);
+
+    return {
+      levelsGained,
+      previousExperience,
+      previousLevel,
+      previousUnspentAttributePoints,
+    };
+  }
+
+  private async persistPlayerProgression(
+    sessionId: string,
+    player: PlayerState,
+  ) {
+    const identity = this.playerIdentities.get(sessionId);
+
+    if (!identity) {
+      throw new Error("PLAYER_IDENTITY_MISSING");
+    }
+
+    await firebaseAdminFirestore
+      .collection("users")
+      .doc(identity.playerUid)
+      .collection("characters")
+      .doc(identity.characterId)
+      .update({
+        Experience: player.experience,
+        Level: player.level,
+        UnspentAttributePoints: player.unspentAttributePoints,
+        "Resources.CurrentHP": Math.max(
+          0,
+          Math.min(player.currentHealth, player.maxHealth),
+        ),
+        "Resources.MaxHP": player.maxHealth,
+      });
+  }
+
   private awardMonsterExperience(
     killerSessionId: string,
     monsterId: string,
@@ -2783,35 +4349,138 @@ if (
       return;
     }
 
+    const pending = this.pendingExperienceAwards.get(killerSessionId);
+
+    this.pendingExperienceAwards.set(killerSessionId, {
+      amount: (pending?.amount ?? 0) + safeAmount,
+      monsterId,
+      monsterType,
+    });
+
+    void this.flushPendingExperienceAward(killerSessionId);
+  }
+
+  private async flushPendingExperienceAward(
+    killerSessionId: string,
+  ) {
+    if (
+      this.playerProgressionOperations.has(killerSessionId) ||
+      this.playerAttributeOperations.has(killerSessionId)
+    ) {
+      return;
+    }
+
+    const pending =
+      this.pendingExperienceAwards.get(killerSessionId);
+
+    if (!pending) {
+      return;
+    }
+
+    const player = this.state.players.get(killerSessionId);
     const killerClient = this.clients.find(
       (client) => client.sessionId === killerSessionId,
     );
 
-    if (!killerClient) {
-      console.warn("[Grandoria] XP reward skipped: killer disconnected.", {
-        killerSessionId,
-        monsterId,
-        monsterType,
-      });
+    if (!player || !killerClient) {
+      this.pendingExperienceAwards.delete(killerSessionId);
+
+      console.warn(
+        "[Grandoria] XP reward skipped: killer is no longer connected.",
+        {
+          killerSessionId,
+          monsterId: pending.monsterId,
+          monsterType: pending.monsterType,
+        },
+      );
       return;
     }
 
-    killerClient.send("xp_awarded", {
-      amount: safeAmount,
-      monsterId,
-      monsterType,
+    this.pendingExperienceAwards.delete(killerSessionId);
+    this.playerProgressionOperations.add(killerSessionId);
+
+    const previousLevel = player.level;
+    const previousExperience = player.experience;
+    const previousExperienceToNextLevel =
+      player.experienceToNextLevel;
+    const previousUnspentAttributePoints =
+      player.unspentAttributePoints;
+    const previousCurrentHealth = player.currentHealth;
+    const previousMaxHealth = player.maxHealth;
+
+    const progression = this.applyExperienceToPlayer(
+      player,
+      pending.amount,
+    );
+
+    if (progression.levelsGained > 0) {
+      this.recalculatePlayerMaxHealth(player);
+    }
+
+    try {
+      await this.persistPlayerProgression(
+        killerSessionId,
+        player,
+      );
+    } catch (error) {
+      player.level = previousLevel;
+      player.experience = previousExperience;
+      player.experienceToNextLevel =
+        previousExperienceToNextLevel;
+      player.unspentAttributePoints =
+        previousUnspentAttributePoints;
+      player.currentHealth = previousCurrentHealth;
+      player.maxHealth = previousMaxHealth;
+      player.isAlive = player.currentHealth > 0;
+
+      killerClient.send("progression_updated", {
+        code: "PROGRESSION_SAVE_FAILED",
+        ok: false,
+      });
+
+      console.error(
+        "[Grandoria] Progression save failed:",
+        error,
+      );
+      return;
+    } finally {
+      this.playerProgressionOperations.delete(killerSessionId);
+    }
+
+    killerClient.send("progression_updated", {
+      amount: pending.amount,
+      code: "XP_AWARDED",
+      experience: player.experience,
+      experienceToNextLevel: player.experienceToNextLevel,
+      level: player.level,
+      levelsGained: progression.levelsGained,
+      currentHealth: player.currentHealth,
+      maxHealth: player.maxHealth,
+      monsterId: pending.monsterId,
+      monsterType: pending.monsterType,
+      ok: true,
+      unspentAttributePoints: player.unspentAttributePoints,
     });
 
-    console.log("[Grandoria] Monster XP awarded:", {
-      amount: safeAmount,
+    console.log("[Grandoria] Monster XP persisted:", {
+      amount: pending.amount,
+      experience: player.experience,
+      experienceToNextLevel: player.experienceToNextLevel,
       killerSessionId,
-      monsterId,
-      monsterType,
+      level: player.level,
+      levelsGained: progression.levelsGained,
+      monsterId: pending.monsterId,
+      monsterType: pending.monsterType,
+      unspentAttributePoints: player.unspentAttributePoints,
     });
+
+    void this.flushPendingExperienceAward(killerSessionId);
   }
 
   private fixedTick(deltaTime: number) {
     this.updatePlayerLifecycle(deltaTime);
+
+    this.updatePlayerHealthRegeneration(deltaTime);
 
     this.updateMonsterLifecycle(deltaTime);
 
@@ -2828,9 +4497,27 @@ if (
         this.playerInputs.set(sessionId, createIdleInput());
         this.playerCollisionBlocks.delete(sessionId);
         this.playerAttackRemaining.delete(sessionId);
+        this.playerAttackCooldownRemaining.delete(sessionId);
         this.playerAttackTargets.delete(sessionId);
+        this.playerHealthRegenStates.delete(sessionId);
         player.animation = "death";
         return;
+      }
+
+      const attackCooldownRemaining =
+        this.playerAttackCooldownRemaining.get(sessionId);
+
+      if (attackCooldownRemaining !== undefined) {
+        const nextCooldownRemaining = attackCooldownRemaining - deltaTime;
+
+        if (nextCooldownRemaining > 0) {
+          this.playerAttackCooldownRemaining.set(
+            sessionId,
+            nextCooldownRemaining,
+          );
+        } else {
+          this.playerAttackCooldownRemaining.delete(sessionId);
+        }
       }
 
       const attackRemaining = this.playerAttackRemaining.get(sessionId);
@@ -2943,6 +4630,77 @@ if (
     });
   }
 
+  private updatePlayerHealthRegeneration(deltaTime: number) {
+    const safeDeltaTime =
+      Number.isFinite(deltaTime) && deltaTime > 0
+        ? deltaTime
+        : 0;
+
+    this.state.players.forEach((player, sessionId) => {
+      const regenPerSecond =
+        Number.isFinite(player.combatStats.healthRegenPerSecond)
+          ? Math.max(0, player.combatStats.healthRegenPerSecond)
+          : 0;
+
+      if (
+        safeDeltaTime <= 0 ||
+        !player.isAlive ||
+        player.currentHealth <= 0 ||
+        player.currentHealth >= player.maxHealth ||
+        regenPerSecond <= 0
+      ) {
+        this.playerHealthRegenStates.delete(sessionId);
+        return;
+      }
+
+      const regenState =
+        this.playerHealthRegenStates.get(sessionId) ?? {
+          elapsedMs: 0,
+          fractionalHealth: 0,
+        };
+
+      regenState.elapsedMs += safeDeltaTime;
+
+      while (
+        regenState.elapsedMs + TIMER_EPSILON_MS >=
+          PLAYER_HEALTH_REGEN_TICK_MS &&
+        player.currentHealth < player.maxHealth
+      ) {
+        regenState.elapsedMs -= PLAYER_HEALTH_REGEN_TICK_MS;
+
+        const rawHealthToRestore =
+          regenPerSecond *
+            (PLAYER_HEALTH_REGEN_TICK_MS / 1000) +
+          regenState.fractionalHealth;
+
+        const wholeHealthToRestore = Math.max(
+          0,
+          Math.floor(rawHealthToRestore + 1e-9),
+        );
+
+        regenState.fractionalHealth =
+          rawHealthToRestore - wholeHealthToRestore;
+
+        if (wholeHealthToRestore > 0) {
+          player.currentHealth = Math.min(
+            player.maxHealth,
+            player.currentHealth + wholeHealthToRestore,
+          );
+        }
+      }
+
+      if (player.currentHealth >= player.maxHealth) {
+        this.playerHealthRegenStates.delete(sessionId);
+        return;
+      }
+
+      this.playerHealthRegenStates.set(
+        sessionId,
+        regenState,
+      );
+    });
+  }
+
   private updatePlayerLifecycle(deltaTime: number) {
     this.playerRespawnRemaining.forEach((remaining, sessionId) => {
       const player = this.state.players.get(sessionId);
@@ -2998,7 +4756,9 @@ if (
       this.playerInputs.set(sessionId, createIdleInput());
       this.playerCollisionBlocks.delete(sessionId);
       this.playerAttackRemaining.delete(sessionId);
+      this.playerAttackCooldownRemaining.delete(sessionId);
       this.playerAttackTargets.delete(sessionId);
+      this.playerHealthRegenStates.delete(sessionId);
       this.playerRespawnRemaining.delete(sessionId);
 
       console.log(`[Grandoria] Player ${sessionId} respawned.`, {
@@ -3396,8 +5156,15 @@ if (
     }
 
     const previousHealth = player.currentHealth;
+    const mitigatedDamage = this.calculatePhysicalDamageAfterArmor(
+      attack.damage,
+      player.combatStats.armor,
+    );
 
-    player.currentHealth = Math.max(0, previousHealth - attack.damage);
+    player.currentHealth = Math.max(
+      0,
+      previousHealth - mitigatedDamage.damage,
+    );
 
     if (player.currentHealth === 0) {
       player.isAlive = false;
@@ -3416,7 +5183,10 @@ if (
     console.log(`[Grandoria] Player ${targetSessionId} took damage.`, {
       monsterId,
       monsterType: monster.monsterType,
-      damage: attack.damage,
+      rawDamage: mitigatedDamage.rawDamage,
+      armor: mitigatedDamage.armor,
+      damageReductionPercent: mitigatedDamage.damageReductionPercent,
+      damage: mitigatedDamage.damage,
       previousHealth,
       currentHealth: player.currentHealth,
       isAlive: player.isAlive,
@@ -4039,7 +5809,8 @@ if (
       return;
     }
 
-    const damage = PLAYER_ATTACK_DAMAGE;
+    const attackDamage = this.rollPlayerPhysicalAttackDamage(player);
+    const damage = attackDamage.damage;
 
     const previousHealth = monster.currentHealth;
 
@@ -4087,6 +5858,15 @@ if (
     console.log(`[Grandoria] Monster ${monsterId} took damage.`, {
       attackerSessionId: sessionId,
       damage,
+      baseDamage: attackDamage.baseDamage,
+      isCritical: attackDamage.isCritical,
+      criticalChancePercent: attackDamage.criticalChancePercent,
+      criticalRoll: attackDamage.criticalRoll,
+      criticalMultiplier: attackDamage.criticalMultiplier,
+      weaponID: attackDamage.weaponID,
+      weaponRoll: attackDamage.weaponRoll,
+      physicalDamageBonus: attackDamage.physicalDamageBonus,
+      attackIntervalMs: player.attackIntervalMs,
       previousHealth,
       currentHealth: monster.currentHealth,
       isAlive: monster.isAlive,
@@ -4173,6 +5953,34 @@ if (
     );
 
     player.characterId = identity.characterId;
+
+    player.level = authenticatedPlayer.level;
+
+    player.experience = Math.max(
+      0,
+      Math.trunc(Number(authenticatedPlayer.experience) || 0),
+    );
+
+    player.experienceToNextLevel =
+      getExperienceRequiredForLevel(player.level);
+
+    player.unspentAttributePoints =
+      authenticatedPlayer.unspentAttributePoints;
+
+    applyPlayerAttributeValues(
+      player.attributes.Base,
+      authenticatedPlayer.attributes.Base,
+    );
+
+    applyPlayerAttributeValues(
+      player.attributes.Allocated,
+      authenticatedPlayer.attributes.Allocated,
+    );
+
+    applyPlayerAttributeValues(
+      player.attributes.Final,
+      authenticatedPlayer.attributes.Final,
+    );
 
     player.mapId = identity.mapId;
 
@@ -4266,6 +6074,11 @@ if (
       ]),
     );
 
+    this.recalculatePlayerCombatStats(player);
+    const persistedMaxHealth = player.maxHealth;
+    const persistedCurrentHealth = player.currentHealth;
+    this.recalculatePlayerMaxHealth(player);
+
     for (const inventorySlotData of authenticatedPlayer.inventory) {
       const inventorySlot = new PlayerInventorySlotState();
 
@@ -4281,12 +6094,58 @@ if (
 
     this.state.players.set(client.sessionId, player);
 
+    const now = this.skillNow();
+    const activeSkillCooldowns = new Map<string, number>();
+
+    for (const [skillID, cooldownEndsAt] of Object.entries(
+      authenticatedPlayer.skillCooldowns ?? {},
+    )) {
+      if (cooldownEndsAt > now) {
+        activeSkillCooldowns.set(skillID, cooldownEndsAt);
+      }
+    }
+
+    if (activeSkillCooldowns.size > 0) {
+      this.playerSkillCooldowns.set(client.sessionId, activeSkillCooldowns);
+    }
+
+    if (
+      persistedMaxHealth !== player.maxHealth ||
+      persistedCurrentHealth !== player.currentHealth
+    ) {
+      console.log(
+        `[Grandoria] Authoritative health reconciled in memory: ${client.sessionId}`,
+        {
+          persistedCurrentHealth,
+          persistedMaxHealth,
+          currentHealth: player.currentHealth,
+          maxHealth: player.maxHealth,
+        },
+      );
+    }
+
     this.playerInputs.set(client.sessionId, createIdleInput());
 
     console.log(
       `[Grandoria] Player ${client.sessionId} joined.`,
       `Character: ${player.displayName || "not provided"}.`,
       `Map: ${player.mapId || "not provided"}.`,
+      `Level: ${player.level}.`,
+      `XP: ${player.experience}/${player.experienceToNextLevel}.`,
+      "Final attributes:",
+      {
+        AttackPower: player.attributes.Final.AttackPower,
+        MagicPower: player.attributes.Final.MagicPower,
+        HealingPower: player.attributes.Final.HealingPower,
+        Agility: player.attributes.Final.Agility,
+        Vitality: player.attributes.Final.Vitality,
+        Regeneration: player.attributes.Final.Regeneration,
+        Armor: player.attributes.Final.Armor,
+        CriticalChance: player.attributes.Final.CriticalChance,
+      },
+      "Combat stats:",
+      this.readPlayerCombatStats(player),
+      `Health: ${player.currentHealth}/${player.maxHealth}.`,
       "Equipment:",
       {
         Head: {
@@ -4344,11 +6203,21 @@ if (
   this.playerCollisionBlocks.delete(client.sessionId);
   this.playerIdentities.delete(client.sessionId);
   this.playerAttackRemaining.delete(client.sessionId);
+  this.playerAttackCooldownRemaining.delete(client.sessionId);
   this.playerAttackTargets.delete(client.sessionId);
+  this.playerHealthRegenStates.delete(client.sessionId);
+  this.playerProgressionOperations.delete(client.sessionId);
+  this.pendingExperienceAwards.delete(client.sessionId);
   this.playerRespawnRemaining.delete(client.sessionId);
   this.completedDropRequests.delete(client.sessionId);
   this.completedPurchaseRequests.delete(client.sessionId);
+  this.completedSaleRequests.delete(client.sessionId);
+  this.completedAttributeAllocationRequests.delete(client.sessionId);
+  this.completedSkillUseRequests.delete(client.sessionId);
+  this.playerSkillCooldowns.delete(client.sessionId);
+  this.playerSkillOperations.delete(client.sessionId);
   this.playerInventoryOperations.delete(client.sessionId);
+  this.playerAttributeOperations.delete(client.sessionId);
 
   this.state.players.delete(client.sessionId);
 
@@ -4387,6 +6256,9 @@ if (
 
           "Resources.CurrentHP":
             Math.max(0, Math.min(player.currentHealth, player.maxHealth)),
+
+          "Resources.MaxHP":
+            player.maxHealth,
         });
 
       console.log(
@@ -4447,7 +6319,11 @@ if (
     this.playerCollisionBlocks.clear();
     this.playerIdentities.clear();
     this.playerAttackRemaining.clear();
+    this.playerAttackCooldownRemaining.clear();
     this.playerAttackTargets.clear();
+    this.playerHealthRegenStates.clear();
+    this.playerProgressionOperations.clear();
+    this.pendingExperienceAwards.clear();
     this.playerRespawnRemaining.clear();
     this.monsterHurtRemaining.clear();
     this.monsterDeathRemaining.clear();
@@ -4457,6 +6333,11 @@ if (
     this.monsterAttackStates.clear();
     this.monsterAttackCooldownRemaining.clear();
     this.monstersPendingRespawnIdleTick.clear();
+    this.completedAttributeAllocationRequests.clear();
+    this.completedSkillUseRequests.clear();
+    this.playerSkillCooldowns.clear();
+    this.playerSkillOperations.clear();
+    this.playerAttributeOperations.clear();
     this.monsterSpawnsById.clear();
     this.monsterRegionsByMonsterId.clear();
 

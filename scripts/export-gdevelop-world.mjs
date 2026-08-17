@@ -48,8 +48,16 @@ const DEFAULT_ITEM_CATALOG_PATH = join(
   "items.json",
 );
 
+const DEFAULT_SKILL_CATALOG_PATH = join(
+  SERVER_ROOT,
+  "src",
+  "skills",
+  "skills.json",
+);
+
 const MONSTER_CATALOG_SCHEMA_VERSION = 2;
 const ITEM_CATALOG_SCHEMA_VERSION = 1;
+const SKILL_CATALOG_SCHEMA_VERSION = 1;
 
 const PLAYER_BLOCKER_OBJECTS = [
   "Alquimia_table",
@@ -312,6 +320,10 @@ export function serializeMonsterCatalog(catalog) {
 }
 
 export function serializeItemCatalog(catalog) {
+  return serializeWorldArtifact(catalog);
+}
+
+export function serializeSkillCatalog(catalog) {
   return serializeWorldArtifact(catalog);
 }
 
@@ -2288,6 +2300,253 @@ function buildItemCatalogFromProject(project, sourceProject) {
   };
 }
 
+
+function readSkillDefinitionFromGDevelop(skill) {
+  const skillID = skill.name;
+  const label = `Global variable skills_data.${skillID}`;
+
+  assertCondition(
+    /^[A-Za-z0-9_-]+$/.test(skillID),
+    `${label} skill ID must use only letters, numbers, _ or -.`,
+  );
+
+  const nameDisplay = requireStructureChild(
+    skill,
+    "name_display",
+    "string",
+    label,
+  );
+  const enabled = requireStructureChild(
+    skill,
+    "enabled",
+    "boolean",
+    label,
+  );
+  const availableToAll = requireStructureChild(
+    skill,
+    "available_to_all",
+    "boolean",
+    label,
+  );
+  const type = requireStructureChild(
+    skill,
+    "type",
+    "string",
+    label,
+  );
+  const target = requireStructureChild(
+    skill,
+    "target",
+    "string",
+    label,
+  );
+  const cooldownMs = requireStructureChild(
+    skill,
+    "cooldown_ms",
+    "number",
+    label,
+  );
+  const castTimeMs = requireStructureChild(
+    skill,
+    "cast_time_ms",
+    "number",
+    label,
+  );
+  const resourceType = requireStructureChild(
+    skill,
+    "resource_type",
+    "string",
+    label,
+  );
+  const resourceCost = requireStructureChild(
+    skill,
+    "resource_cost",
+    "number",
+    label,
+  );
+  const effectsSource = requireNestedStructureChild(
+    skill,
+    "effects",
+    label,
+  );
+  const scalingSource = requireNestedStructureChild(
+    skill,
+    "scaling",
+    label,
+  );
+  const scalingAttribute = requireStructureChild(
+    scalingSource,
+    "attribute",
+    "string",
+    `${label}.scaling`,
+  );
+  const scalingPerPoint = requireStructureChild(
+    scalingSource,
+    "per_point",
+    "number",
+    `${label}.scaling`,
+  );
+
+  assertCondition(
+    typeof nameDisplay === "string" && nameDisplay.trim().length > 0,
+    `${label}.name_display must be a non-empty string.`,
+  );
+  assertCondition(
+    typeof type === "string" && /^[A-Za-z][A-Za-z0-9_-]*$/.test(type),
+    `${label}.type must use only letters, numbers, _ or -.`,
+  );
+  assertCondition(
+    typeof target === "string" && /^[A-Za-z][A-Za-z0-9_-]*$/.test(target),
+    `${label}.target must use only letters, numbers, _ or -.`,
+  );
+  assertCondition(
+    Number.isInteger(cooldownMs) && cooldownMs >= 0,
+    `${label}.cooldown_ms must be an integer >= 0.`,
+  );
+  assertCondition(
+    Number.isInteger(castTimeMs) && castTimeMs >= 0,
+    `${label}.cast_time_ms must be an integer >= 0.`,
+  );
+  assertCondition(
+    typeof resourceType === "string" &&
+      /^[A-Za-z][A-Za-z0-9_-]*$/.test(resourceType),
+    `${label}.resource_type must use only letters, numbers, _ or -.`,
+  );
+  assertCondition(
+    Number.isFinite(resourceCost) && resourceCost >= 0,
+    `${label}.resource_cost must be a number >= 0.`,
+  );
+  assertCondition(
+    typeof scalingAttribute === "string" &&
+      /^[A-Za-z][A-Za-z0-9_-]*$/.test(scalingAttribute),
+    `${label}.scaling.attribute must use only letters, numbers, _ or -.`,
+  );
+  assertCondition(
+    Number.isFinite(scalingPerPoint) && scalingPerPoint >= 0,
+    `${label}.scaling.per_point must be a number >= 0.`,
+  );
+
+  const effects = readGenericGDevelopVariable(
+    effectsSource,
+    `${label}.effects`,
+  );
+
+  assertCondition(
+    effects &&
+      typeof effects === "object" &&
+      !Array.isArray(effects) &&
+      Object.keys(effects).length > 0,
+    `${label}.effects must contain at least one effect field.`,
+  );
+
+  if (type.toLowerCase() === "healing") {
+    const healPercentMaxHP = effects.heal_percent_max_hp;
+
+    assertCondition(
+      typeof healPercentMaxHP === "number" &&
+        Number.isFinite(healPercentMaxHP) &&
+        healPercentMaxHP > 0 &&
+        healPercentMaxHP <= 100,
+      `${label}.effects.heal_percent_max_hp must be a number greater than 0 and at most 100 for healing skills.`,
+    );
+  }
+
+  if (resourceType.toLowerCase() === "none") {
+    assertCondition(
+      resourceCost === 0,
+      `${label}.resource_cost must be 0 when resource_type is none.`,
+    );
+  }
+
+  if (scalingAttribute.toLowerCase() === "none") {
+    assertCondition(
+      scalingPerPoint === 0,
+      `${label}.scaling.per_point must be 0 when scaling.attribute is none.`,
+    );
+  }
+
+  return {
+    availableToAll,
+    castTimeMs,
+    cooldownMs,
+    effects,
+    enabled,
+    id: skillID,
+    nameDisplay,
+    resourceCost,
+    resourceType: resourceType.toLowerCase(),
+    scaling: {
+      attribute: scalingAttribute,
+      perPoint: scalingPerPoint,
+    },
+    target: target.toLowerCase(),
+    type: type.toLowerCase(),
+  };
+}
+
+function buildSkillCatalogFromProject(project, sourceProject) {
+  const skillsData = readGlobalVariable(project, "skills_data");
+
+  assertCondition(
+    skillsData.type === "structure" && Array.isArray(skillsData.children),
+    "Global variable skills_data must have type structure.",
+  );
+
+  const definitions = {};
+  const skillStructures = requireCatalogStructureChildren(
+    skillsData,
+    "Global variable skills_data",
+  );
+
+  for (const skillStructure of skillStructures) {
+    const skillID = skillStructure.name;
+
+    assertCondition(
+      !Object.prototype.hasOwnProperty.call(definitions, skillID),
+      `Duplicate skill ID in skills_data: ${skillID}. Skill IDs must be globally unique.`,
+    );
+
+    definitions[skillID] = readSkillDefinitionFromGDevelop(
+      skillStructure,
+    );
+  }
+
+  assertCondition(
+    Object.keys(definitions).length > 0,
+    "Global variable skills_data contains no skill definitions.",
+  );
+
+  const basicHeal = definitions.skill_heal_basic;
+
+  assertCondition(
+    basicHeal,
+    "Global variable skills_data must contain skill_heal_basic.",
+  );
+  assertCondition(
+    basicHeal.enabled === true &&
+      basicHeal.availableToAll === true &&
+      basicHeal.type === "healing" &&
+      basicHeal.target === "self",
+    "skill_heal_basic must remain an enabled universal self-healing skill.",
+  );
+  assertCondition(
+    basicHeal.resourceType === "none" &&
+      basicHeal.resourceCost === 0 &&
+      basicHeal.scaling.attribute.toLowerCase() === "none" &&
+      basicHeal.scaling.perPoint === 0,
+    "skill_heal_basic must not use resources or attribute scaling.",
+  );
+
+  return {
+    catalogSchemaVersion: SKILL_CATALOG_SCHEMA_VERSION,
+    definitions,
+    exporterVersion: EXPORTER_VERSION,
+    source: {
+      project: sourceProject,
+    },
+  };
+}
+
 function assertItemVisualObjectsExist(project, itemCatalog) {
   const globalObjects = Array.isArray(project.objects) ? project.objects : [];
 
@@ -3431,6 +3690,43 @@ export function buildItemCatalog({ projectPath }) {
   return catalog;
 }
 
+
+export function buildSkillCatalog({ projectPath }) {
+  assertCondition(
+    typeof projectPath === "string" && projectPath.length > 0,
+    "A canonical GDevelop project path is required.",
+  );
+
+  const absoluteProjectPath = resolve(projectPath);
+
+  assertCondition(existsSync(absoluteProjectPath), `Canonical project is missing: ${projectPath}`);
+  assertCondition(
+    basename(absoluteProjectPath) === EXPECTED_PROJECT_FILE,
+    `Only ${EXPECTED_PROJECT_FILE} may be used as the canonical source.`,
+  );
+
+  const projectBytes = readFileSync(absoluteProjectPath);
+  const normalizedProjectBytes = normalizeJsonSourceBytes(projectBytes);
+  const project = parseJson(projectBytes, EXPECTED_PROJECT_FILE);
+
+  assertCondition(
+    project.firstLayout === EXPECTED_FIRST_LAYOUT,
+    `firstLayout must remain ${EXPECTED_FIRST_LAYOUT}.`,
+  );
+
+  const sourceProject = {
+    file: EXPECTED_PROJECT_FILE,
+    sha256: sha256(normalizedProjectBytes),
+    sizeBytes: normalizedProjectBytes.length,
+  };
+  const catalog = buildSkillCatalogFromProject(project, sourceProject);
+
+  validateJsonValue(catalog);
+  assertNoAbsolutePaths(catalog);
+
+  return catalog;
+}
+
 function escapeXml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -3694,12 +3990,16 @@ function runCli(argv) {
   const secondMonsterCatalog = buildMonsterCatalog({ projectPath });
   const firstItemCatalog = buildItemCatalog({ projectPath });
   const secondItemCatalog = buildItemCatalog({ projectPath });
+  const firstSkillCatalog = buildSkillCatalog({ projectPath });
+  const secondSkillCatalog = buildSkillCatalog({ projectPath });
   const generatedText = serializeWorldArtifact(firstArtifact);
   const repeatedText = serializeWorldArtifact(secondArtifact);
   const generatedMonsterCatalogText = serializeMonsterCatalog(firstMonsterCatalog);
   const repeatedMonsterCatalogText = serializeMonsterCatalog(secondMonsterCatalog);
   const generatedItemCatalogText = serializeItemCatalog(firstItemCatalog);
   const repeatedItemCatalogText = serializeItemCatalog(secondItemCatalog);
+  const generatedSkillCatalogText = serializeSkillCatalog(firstSkillCatalog);
+  const repeatedSkillCatalogText = serializeSkillCatalog(secondSkillCatalog);
 
   assertCondition(
     generatedText === repeatedText,
@@ -3712,6 +4012,10 @@ function runCli(argv) {
   assertCondition(
     generatedItemCatalogText === repeatedItemCatalogText,
     "Item catalog output is unstable for unchanged source bytes.",
+  );
+  assertCondition(
+    generatedSkillCatalogText === repeatedSkillCatalogText,
+    "Skill catalog output is unstable for unchanged source bytes.",
   );
 
   assertMonsterDropItemsExist(firstMonsterCatalog, firstItemCatalog);
@@ -3737,9 +4041,19 @@ function runCli(argv) {
         readFileSync(DEFAULT_ITEM_CATALOG_PATH, "utf8"),
       "The committed item catalog is stale. Run the exporter and review the diff.",
     );
+    assertCondition(
+      existsSync(DEFAULT_SKILL_CATALOG_PATH),
+      `Committed skill catalog is missing: ${DEFAULT_SKILL_CATALOG_PATH}`,
+    );
+    assertCondition(
+      generatedSkillCatalogText ===
+        readFileSync(DEFAULT_SKILL_CATALOG_PATH, "utf8"),
+      "The committed skill catalog is stale. Run the exporter and review the diff.",
+    );
     console.log(`World artifact is current: ${outputPath}`);
     console.log(`Monster catalog is current: ${DEFAULT_MONSTER_CATALOG_PATH}`);
     console.log(`Item catalog is current: ${DEFAULT_ITEM_CATALOG_PATH}`);
+    console.log(`Skill catalog is current: ${DEFAULT_SKILL_CATALOG_PATH}`);
   } else {
     mkdirSync(dirname(outputPath), { recursive: true });
     writeFileSync(outputPath, generatedText, "utf8");
@@ -3755,9 +4069,16 @@ function runCli(argv) {
       generatedItemCatalogText,
       "utf8",
     );
+    mkdirSync(dirname(DEFAULT_SKILL_CATALOG_PATH), { recursive: true });
+    writeFileSync(
+      DEFAULT_SKILL_CATALOG_PATH,
+      generatedSkillCatalogText,
+      "utf8",
+    );
     console.log(`World artifact exported: ${outputPath}`);
     console.log(`Monster catalog exported: ${DEFAULT_MONSTER_CATALOG_PATH}`);
     console.log(`Item catalog exported: ${DEFAULT_ITEM_CATALOG_PATH}`);
+    console.log(`Skill catalog exported: ${DEFAULT_SKILL_CATALOG_PATH}`);
   }
 
   if (svgPath) {
