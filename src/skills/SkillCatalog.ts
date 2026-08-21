@@ -9,6 +9,7 @@ export type SkillDefinition = {
   nameDisplay: string;
   enabled: boolean;
   availableToAll: boolean;
+  loadoutEligible: boolean;
   type: string;
   target: string;
   cooldownMs: number;
@@ -272,6 +273,10 @@ function readSkillDefinition(
     effects,
     enabled: requireBoolean(source.enabled, `${skillID}.enabled`),
     id: skillID,
+    loadoutEligible: requireBoolean(
+      source.loadoutEligible,
+      `${skillID}.loadoutEligible`,
+    ),
     nameDisplay: requireString(
       source.nameDisplay,
       `${skillID}.nameDisplay`,
@@ -318,11 +323,12 @@ function loadSkillDefinitions(): Readonly<Record<string, SkillDefinition>> {
     !basicHeal ||
     !basicHeal.enabled ||
     !basicHeal.availableToAll ||
+    basicHeal.loadoutEligible ||
     basicHeal.type !== "healing" ||
     basicHeal.target !== "self"
   ) {
     fail(
-      "skill_heal_basic must exist as an enabled universal self-healing skill.",
+      "skill_heal_basic must exist as an enabled universal self-healing skill outside SkillLoadout.",
     );
   }
 

@@ -5,12 +5,14 @@ import { ColyseusTestServer, boot } from "@colyseus/testing";
 
 import appConfig from "../src/app.config.js";
 import { MyRoom } from "../src/rooms/MyRoom.js";
+import { installTestAuthentication } from "./TestAuthentication.js";
 
 const ROOM_NAME = "my_room";
 const MAP_ID = "MAP_1";
 const FIXED_TIME_STEP_MS = 1000 / 60;
 const ATTACK_HIT_TICKS = 15;
-const ATTACK_FINISH_TICKS_AFTER_HIT = 5;
+const ATTACK_FINISH_TICKS_AFTER_HIT =
+  Math.ceil(1_500 / FIXED_TIME_STEP_MS) - ATTACK_HIT_TICKS + 1;
 const DEATH_DURATION_MS = 480;
 const RESPAWN_DELAY_MS = 10_000;
 const PLAYER_MAX_HEALTH = 50;
@@ -18,15 +20,14 @@ const BOAR_ATTACK_DAMAGE = 7;
 const BOAR_ATTACK_HIT_TICKS = 15;
 const PLAYER_RESPAWN_TICKS = 180;
 
+installTestAuthentication();
+
 type MonsterFixture = {
   id: string;
   type: string;
   mapId: string;
-  x: number;
-  y: number;
-  direction: "up" | "down" | "left" | "right";
   maxHealth: number;
-  attackPosition: {
+  attackOffset: {
     x: number;
     y: number;
     direction: "up" | "down" | "left" | "right";
@@ -34,31 +35,25 @@ type MonsterFixture = {
 };
 
 const HARE_MONSTER: MonsterFixture = {
-  id: "map1_hare_001",
+  id: "grassland_hare_01__001",
   type: "mob_hare",
   mapId: MAP_ID,
-  x: 168,
-  y: 968,
-  direction: "down",
   maxHealth: 2,
-  attackPosition: {
-    x: 150,
-    y: 968,
+  attackOffset: {
+    x: -18,
+    y: 0,
     direction: "right",
   },
 };
 
 const BOAR_MONSTER: MonsterFixture = {
-  id: "map1_boar_001",
+  id: "grassland_boar_01__001",
   type: "mob_boar",
   mapId: MAP_ID,
-  x: 144,
-  y: 1056,
-  direction: "down",
   maxHealth: 10,
-  attackPosition: {
-    x: 144,
-    y: 1032,
+  attackOffset: {
+    x: 0,
+    y: -24,
     direction: "down",
   },
 };
@@ -68,9 +63,9 @@ const DEFAULT_JOIN_OPTIONS = {
   characterId: "test-character",
   characterName: "Test Character",
   mapId: MAP_ID,
-  x: HARE_MONSTER.attackPosition.x,
-  y: HARE_MONSTER.attackPosition.y,
-  direction: HARE_MONSTER.attackPosition.direction,
+  x: 728,
+  y: 1362,
+  direction: "down" as const,
 };
 
 type JoinOptions = typeof DEFAULT_JOIN_OPTIONS;
@@ -89,6 +84,13 @@ function advanceFixedTicks(room: TestableMyRoom, tickCount: number) {
   for (let tick = 0; tick < tickCount; tick += 1) {
     room.fixedTick(FIXED_TIME_STEP_MS);
   }
+}
+
+function assertClose(actual: number, expected: number, tolerance = 1e-9) {
+  assert.ok(
+    Math.abs(actual - expected) <= tolerance,
+    `Expected ${expected}, received ${actual}`,
+  );
 }
 
 async function sendAttack(
@@ -118,30 +120,41 @@ describe("MyRoom authoritative monster combat", () => {
     await colyseus.cleanup();
   });
 
-  async function createJoinedRoom(overrides: Partial<JoinOptions> = {}) {
+  async function createJoinedRoom(
+    overrides: Partial<JoinOptions> = {},
+    attackMonster: MonsterFixture = HARE_MONSTER,
+  ) {
     const room = await colyseus.createRoom<MyRoom>(ROOM_NAME, {});
 
     // Stop only this test room's native interval. Tests advance the same
     // production simulation step synchronously without real-time sleeps.
     room.setSimulationInterval();
 
-    const client = await colyseus.connectTo(room, {
+    for (const monsterId of room.state.monsters.keys()) {
+      if (monsterId !== HARE_MONSTER.id && monsterId !== BOAR_MONSTER.id) {
+        room.state.monsters.delete(monsterId);
+      }
+    }
+
+    const target = room.state.monsters.get(attackMonster.id);
+
+    assert.ok(target);
+
+    const joinOptions = {
       ...DEFAULT_JOIN_OPTIONS,
+      mapId: target.mapId,
+      x: target.x + attackMonster.attackOffset.x,
+      y: target.y + attackMonster.attackOffset.y,
+      direction: attackMonster.attackOffset.direction,
       ...overrides,
-    });
+    };
+
+    const client = await colyseus.connectTo(room, joinOptions);
 
     return {
       client,
+      joinOptions,
       room: room as unknown as TestableMyRoom,
-    };
-  }
-
-  function getAttackJoinOptions(monster: MonsterFixture): Partial<JoinOptions> {
-    return {
-      mapId: monster.mapId,
-      x: monster.attackPosition.x,
-      y: monster.attackPosition.y,
-      direction: monster.attackPosition.direction,
     };
   }
 
@@ -160,6 +173,19 @@ describe("MyRoom authoritative monster combat", () => {
     monster: MonsterFixture = HARE_MONSTER,
   ) {
     for (let hit = 0; hit < monster.maxHealth; hit += 1) {
+      const player = room.state.players.get(client.sessionId);
+      const target = room.state.monsters.get(monster.id);
+
+      assert.ok(player);
+      assert.ok(target);
+
+      player.mapId = target.mapId;
+      player.x = target.x + monster.attackOffset.x;
+      player.y = target.y + monster.attackOffset.y;
+      player.direction = monster.attackOffset.direction;
+      player.currentHealth = player.maxHealth;
+      player.isAlive = true;
+
       await performValidHit(room, client, monster);
 
       if (hit < monster.maxHealth - 1) {
@@ -169,7 +195,7 @@ describe("MyRoom authoritative monster combat", () => {
   }
 
   it("synchronizes the joined player and both initial monster types", async () => {
-    const { client, room } = await createJoinedRoom();
+    const { client, joinOptions, room } = await createJoinedRoom();
 
     assert.strictEqual(client.sessionId, room.clients[0].sessionId);
 
@@ -184,9 +210,9 @@ describe("MyRoom authoritative monster combat", () => {
 
     assert.ok(serverPlayer);
     assert.strictEqual(serverPlayer.mapId, MAP_ID);
-    assert.strictEqual(serverPlayer.x, DEFAULT_JOIN_OPTIONS.x);
-    assert.strictEqual(serverPlayer.y, DEFAULT_JOIN_OPTIONS.y);
-    assert.strictEqual(serverPlayer.direction, DEFAULT_JOIN_OPTIONS.direction);
+    assert.strictEqual(serverPlayer.x, joinOptions.x);
+    assert.strictEqual(serverPlayer.y, joinOptions.y);
+    assert.strictEqual(serverPlayer.direction, joinOptions.direction);
     assert.strictEqual(serverPlayer.currentHealth, PLAYER_MAX_HEALTH);
     assert.strictEqual(serverPlayer.maxHealth, PLAYER_MAX_HEALTH);
     assert.strictEqual(serverPlayer.isAlive, true);
@@ -194,9 +220,9 @@ describe("MyRoom authoritative monster combat", () => {
     assert.ok(serverHare);
     assert.strictEqual(serverHare.monsterType, HARE_MONSTER.type);
     assert.strictEqual(serverHare.mapId, HARE_MONSTER.mapId);
-    assert.strictEqual(serverHare.x, HARE_MONSTER.x);
-    assert.strictEqual(serverHare.y, HARE_MONSTER.y);
-    assert.strictEqual(serverHare.direction, HARE_MONSTER.direction);
+    assert.ok(Number.isFinite(serverHare.x));
+    assert.ok(Number.isFinite(serverHare.y));
+    assert.strictEqual(serverHare.direction, "down");
     assert.strictEqual(serverHare.animation, "idle");
     assert.strictEqual(serverHare.currentHealth, HARE_MONSTER.maxHealth);
     assert.strictEqual(serverHare.maxHealth, HARE_MONSTER.maxHealth);
@@ -205,9 +231,9 @@ describe("MyRoom authoritative monster combat", () => {
     assert.ok(serverBoar);
     assert.strictEqual(serverBoar.monsterType, BOAR_MONSTER.type);
     assert.strictEqual(serverBoar.mapId, BOAR_MONSTER.mapId);
-    assert.strictEqual(serverBoar.x, BOAR_MONSTER.x);
-    assert.strictEqual(serverBoar.y, BOAR_MONSTER.y);
-    assert.strictEqual(serverBoar.direction, BOAR_MONSTER.direction);
+    assert.ok(Number.isFinite(serverBoar.x));
+    assert.ok(Number.isFinite(serverBoar.y));
+    assert.strictEqual(serverBoar.direction, "down");
     assert.strictEqual(serverBoar.animation, "idle");
     assert.strictEqual(serverBoar.currentHealth, BOAR_MONSTER.maxHealth);
     assert.strictEqual(serverBoar.maxHealth, BOAR_MONSTER.maxHealth);
@@ -217,10 +243,14 @@ describe("MyRoom authoritative monster combat", () => {
     assert.strictEqual(syncedPlayer.mapId, MAP_ID);
     assert.ok(syncedHare);
     assert.strictEqual(syncedHare.monsterType, HARE_MONSTER.type);
+    assertClose(syncedHare.x, serverHare.x, 1e-4);
+    assertClose(syncedHare.y, serverHare.y, 1e-4);
     assert.strictEqual(syncedHare.currentHealth, HARE_MONSTER.maxHealth);
     assert.strictEqual(syncedHare.isAlive, true);
     assert.ok(syncedBoar);
     assert.strictEqual(syncedBoar.monsterType, BOAR_MONSTER.type);
+    assertClose(syncedBoar.x, serverBoar.x, 1e-4);
+    assertClose(syncedBoar.y, serverBoar.y, 1e-4);
     assert.strictEqual(syncedBoar.currentHealth, BOAR_MONSTER.maxHealth);
     assert.strictEqual(syncedBoar.isAlive, true);
   });
@@ -303,9 +333,7 @@ describe("MyRoom authoritative monster combat", () => {
   });
 
   it("damages only the boar for a valid boar attack", async () => {
-    const { client, room } = await createJoinedRoom(
-      getAttackJoinOptions(BOAR_MONSTER),
-    );
+    const { client, room } = await createJoinedRoom({}, BOAR_MONSTER);
 
     await sendAttack(room, client, { monsterId: BOAR_MONSTER.id });
     advanceFixedTicks(room, ATTACK_HIT_TICKS - 1);
@@ -330,9 +358,7 @@ describe("MyRoom authoritative monster combat", () => {
   });
 
   it("starts the boar attack and damages the player on the hit frame", async () => {
-    const { client, room } = await createJoinedRoom(
-      getAttackJoinOptions(BOAR_MONSTER),
-    );
+    const { client, room } = await createJoinedRoom({}, BOAR_MONSTER);
 
     const player = room.state.players.get(client.sessionId);
     const boar = room.state.monsters.get(BOAR_MONSTER.id);
@@ -360,9 +386,7 @@ describe("MyRoom authoritative monster combat", () => {
   });
 
   it("does not damage a player who leaves range before the hit frame", async () => {
-    const { client, room } = await createJoinedRoom(
-      getAttackJoinOptions(BOAR_MONSTER),
-    );
+    const { client, room } = await createJoinedRoom({}, BOAR_MONSTER);
 
     const player = room.state.players.get(client.sessionId);
 
@@ -380,9 +404,7 @@ describe("MyRoom authoritative monster combat", () => {
   });
 
   it("respawns a player after lethal boar damage", async () => {
-    const { client, room } = await createJoinedRoom(
-      getAttackJoinOptions(BOAR_MONSTER),
-    );
+    const { client, room } = await createJoinedRoom({}, BOAR_MONSTER);
 
     const player = room.state.players.get(client.sessionId);
 
@@ -423,7 +445,15 @@ describe("MyRoom authoritative monster combat", () => {
   });
 
   it("rejects an attack outside the maximum distance", async () => {
-    const { client, room } = await createJoinedRoom({ x: 100 });
+    const { client, room } = await createJoinedRoom();
+    const player = room.state.players.get(client.sessionId);
+    const hare = room.state.monsters.get(HARE_MONSTER.id);
+
+    assert.ok(player);
+    assert.ok(hare);
+
+    player.x = hare.x - 200;
+    player.y = hare.y;
 
     await performValidHit(room, client);
 
@@ -434,7 +464,12 @@ describe("MyRoom authoritative monster combat", () => {
   });
 
   it("rejects an attack outside the directional hitbox", async () => {
-    const { client, room } = await createJoinedRoom({ direction: "left" });
+    const { client, room } = await createJoinedRoom();
+    const player = room.state.players.get(client.sessionId);
+
+    assert.ok(player);
+
+    player.direction = "left";
 
     await performValidHit(room, client);
 
@@ -562,9 +597,9 @@ describe("MyRoom authoritative monster combat", () => {
     assert.notStrictEqual(respawnedMonster, originalMonster);
     assert.strictEqual(respawnedMonster.monsterType, HARE_MONSTER.type);
     assert.strictEqual(respawnedMonster.mapId, HARE_MONSTER.mapId);
-    assert.strictEqual(respawnedMonster.x, HARE_MONSTER.x);
-    assert.strictEqual(respawnedMonster.y, HARE_MONSTER.y);
-    assert.strictEqual(respawnedMonster.direction, HARE_MONSTER.direction);
+    assert.ok(Number.isFinite(respawnedMonster.x));
+    assert.ok(Number.isFinite(respawnedMonster.y));
+    assert.strictEqual(respawnedMonster.direction, "down");
     assert.strictEqual(respawnedMonster.animation, "idle");
     assert.strictEqual(respawnedMonster.currentHealth, HARE_MONSTER.maxHealth);
     assert.strictEqual(respawnedMonster.maxHealth, HARE_MONSTER.maxHealth);
@@ -572,9 +607,7 @@ describe("MyRoom authoritative monster combat", () => {
   });
 
   it("kills, removes, and respawns the boar through the shared lifecycle", async () => {
-    const { client, room } = await createJoinedRoom(
-      getAttackJoinOptions(BOAR_MONSTER),
-    );
+    const { client, room } = await createJoinedRoom({}, BOAR_MONSTER);
     const originalBoar = room.state.monsters.get(BOAR_MONSTER.id);
 
     assert.ok(originalBoar);
@@ -635,9 +668,9 @@ describe("MyRoom authoritative monster combat", () => {
     assert.notStrictEqual(respawnedBoar, originalBoar);
     assert.strictEqual(respawnedBoar.monsterType, BOAR_MONSTER.type);
     assert.strictEqual(respawnedBoar.mapId, BOAR_MONSTER.mapId);
-    assert.strictEqual(respawnedBoar.x, BOAR_MONSTER.x);
-    assert.strictEqual(respawnedBoar.y, BOAR_MONSTER.y);
-    assert.strictEqual(respawnedBoar.direction, BOAR_MONSTER.direction);
+    assert.ok(Number.isFinite(respawnedBoar.x));
+    assert.ok(Number.isFinite(respawnedBoar.y));
+    assert.strictEqual(respawnedBoar.direction, "down");
     assert.strictEqual(respawnedBoar.animation, "idle");
     assert.strictEqual(respawnedBoar.currentHealth, BOAR_MONSTER.maxHealth);
     assert.strictEqual(respawnedBoar.maxHealth, BOAR_MONSTER.maxHealth);

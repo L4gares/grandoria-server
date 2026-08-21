@@ -55,9 +55,33 @@ const DEFAULT_SKILL_CATALOG_PATH = join(
   "skills.json",
 );
 
+const DEFAULT_CLASS_CATALOG_PATH = join(
+  SERVER_ROOT,
+  "src",
+  "classes",
+  "classes.json",
+);
+
+const DEFAULT_SKILL_SLOT_CATALOG_PATH = join(
+  SERVER_ROOT,
+  "src",
+  "skills",
+  "skill-slots.json",
+);
+
+const DEFAULT_QUEST_CATALOG_PATH = join(
+  SERVER_ROOT,
+  "src",
+  "quests",
+  "quests.json",
+);
+
 const MONSTER_CATALOG_SCHEMA_VERSION = 2;
 const ITEM_CATALOG_SCHEMA_VERSION = 1;
 const SKILL_CATALOG_SCHEMA_VERSION = 1;
+const CLASS_CATALOG_SCHEMA_VERSION = 2;
+const SKILL_SLOT_CATALOG_SCHEMA_VERSION = 1;
+const QUEST_CATALOG_SCHEMA_VERSION = 1;
 
 const PLAYER_BLOCKER_OBJECTS = [
   "Alquimia_table",
@@ -324,6 +348,18 @@ export function serializeItemCatalog(catalog) {
 }
 
 export function serializeSkillCatalog(catalog) {
+  return serializeWorldArtifact(catalog);
+}
+
+export function serializeClassCatalog(catalog) {
+  return serializeWorldArtifact(catalog);
+}
+
+export function serializeSkillSlotCatalog(catalog) {
+  return serializeWorldArtifact(catalog);
+}
+
+export function serializeQuestCatalog(catalog) {
   return serializeWorldArtifact(catalog);
 }
 
@@ -1614,6 +1650,12 @@ function extractSpawnRegions(layout, objectRegistry, resourceRegistry) {
       "Enabled",
       "boolean",
     );
+    const questRegionId = readSpawnRegionVariable(
+      objectRecord.object,
+      instance,
+      "QuestRegionID",
+      "string",
+    );
 
     assertCondition(
       typeof regionId === "string" && /^[A-Za-z0-9_-]+$/.test(regionId),
@@ -1646,6 +1688,11 @@ function extractSpawnRegions(layout, objectRegistry, resourceRegistry) {
       `${regionId}.SpawnPadding must be a non-negative number.`,
     );
     assertCondition(typeof enabled === "boolean", `${regionId}.Enabled must be boolean.`);
+    assertCondition(
+      typeof questRegionId === "string" &&
+        (questRegionId.length === 0 || /^[A-Za-z0-9_-]+$/.test(questRegionId)),
+      `${regionId}.QuestRegionID must be empty or a canonical region ID.`,
+    );
 
     const geometry = extractSpawnRegionBounds(
       objectRecord,
@@ -1660,6 +1707,7 @@ function extractSpawnRegions(layout, objectRegistry, resourceRegistry) {
       mapId: MAP_ID,
       maxAlive,
       mobType,
+      questRegionId,
       respawnSeconds,
       source: {
         instancePersistentUuid: instance.persistentUuid,
@@ -2301,6 +2349,278 @@ function buildItemCatalogFromProject(project, sourceProject) {
 }
 
 
+
+function readClassSkillIdsFromGDevelop(classStructure, label) {
+  const skillsSource = requireNestedStructureChild(
+    classStructure,
+    "skills",
+    label,
+  );
+  const skillIds = [];
+  const seenSkillIds = new Set();
+
+  for (const child of skillsSource.children) {
+    assertCondition(
+      child && typeof child.name === "string" && /^[A-Za-z0-9_-]+$/.test(child.name),
+      `${label}.skills contains an invalid SkillID: ${child?.name ?? "<missing>"}.`,
+    );
+    assertCondition(
+      !seenSkillIds.has(child.name),
+      `${label}.skills.${child.name} is duplicated.`,
+    );
+    seenSkillIds.add(child.name);
+    assertCondition(
+      child.type === "boolean",
+      `${label}.skills.${child.name} must have type boolean.`,
+    );
+
+    if (child.value === true) {
+      skillIds.push(child.name);
+    }
+  }
+
+  return skillIds.sort(compareStrings);
+}
+
+function readClassDefinitionFromGDevelop(classStructure) {
+  const classId = classStructure.name;
+  const label = `Global variable classes_data.${classId}`;
+
+  assertCondition(
+    /^[a-z0-9_]+$/.test(classId),
+    `${label} ClassId must use only lowercase letters, numbers, and underscores.`,
+  );
+
+  const displayName = requireStructureChild(
+    classStructure,
+    "display_name",
+    "string",
+    label,
+  );
+  const baseAttributesSource = requireNestedStructureChild(
+    classStructure,
+    "base_attributes",
+    label,
+  );
+
+  assertCondition(
+    typeof displayName === "string" && displayName.trim().length > 0,
+    `${label}.display_name must be a non-empty string.`,
+  );
+
+  const attributeNames = [
+    "AttackPower",
+    "MagicPower",
+    "HealingPower",
+    "Agility",
+    "Vitality",
+    "Regeneration",
+    "Armor",
+    "CriticalChance",
+  ];
+  const baseAttributes = {};
+
+  for (const attributeName of attributeNames) {
+    const value = requireStructureChild(
+      baseAttributesSource,
+      attributeName,
+      "number",
+      `${label}.base_attributes`,
+    );
+
+    assertCondition(
+      Number.isSafeInteger(value) && value >= 0,
+      `${label}.base_attributes.${attributeName} must be a non-negative integer.`,
+    );
+
+    baseAttributes[attributeName] = value;
+  }
+
+  const unexpectedBaseAttributeNames = baseAttributesSource.children
+    .map((child) => child?.name)
+    .filter((name) => !attributeNames.includes(name));
+
+  assertCondition(
+    unexpectedBaseAttributeNames.length === 0,
+    `${label}.base_attributes contains unsupported attributes: ${unexpectedBaseAttributeNames.join(", ")}.`,
+  );
+
+  const skillIds = readClassSkillIdsFromGDevelop(
+    classStructure,
+    label,
+  );
+
+  return {
+    classId,
+    displayName: displayName.trim(),
+    baseAttributes,
+    skillIds,
+  };
+}
+
+function buildClassCatalogFromProject(project) {
+  const classesData = readGlobalVariable(project, "classes_data");
+
+  assertCondition(
+    classesData.type === "structure" && Array.isArray(classesData.children),
+    "Global variable classes_data must have type structure.",
+  );
+
+  const classes = {};
+  const classStructures = requireCatalogStructureChildren(
+    classesData,
+    "Global variable classes_data",
+  );
+
+  for (const classStructure of classStructures) {
+    const classId = classStructure.name;
+
+    assertCondition(
+      !Object.prototype.hasOwnProperty.call(classes, classId),
+      `Duplicate ClassId in classes_data: ${classId}. ClassIds must be globally unique.`,
+    );
+
+    classes[classId] = readClassDefinitionFromGDevelop(classStructure);
+  }
+
+  assertCondition(
+    Object.keys(classes).length > 0,
+    "Global variable classes_data contains no class definitions.",
+  );
+
+  return {
+    schemaVersion: CLASS_CATALOG_SCHEMA_VERSION,
+    classes,
+  };
+}
+
+
+function readSkillSlotDefinitionFromGDevelop(slotStructure) {
+  const slotId = slotStructure.name;
+  const label = `Global variable skill_slots_data.${slotId}`;
+
+  assertCondition(
+    /^[a-z][a-z0-9_]*$/.test(slotId),
+    `${label} slot ID must start with a lowercase letter and use only lowercase letters, numbers, and underscores.`,
+  );
+
+  const enabled = requireStructureChild(
+    slotStructure,
+    "enabled",
+    "boolean",
+    label,
+  );
+  const inputAction = requireStructureChild(
+    slotStructure,
+    "input_action",
+    "string",
+    label,
+  );
+  const order = requireStructureChild(
+    slotStructure,
+    "order",
+    "number",
+    label,
+  );
+
+  assertCondition(
+    Number.isSafeInteger(order) && order >= 1,
+    `${label}.order must be an integer >= 1.`,
+  );
+  assertCondition(
+    typeof inputAction === "string" &&
+      (inputAction === "" || /^[A-Za-z][A-Za-z0-9_]*$/.test(inputAction)),
+    `${label}.input_action must be empty or a valid action name.`,
+  );
+
+  const supportedFields = new Set([
+    "enabled",
+    "input_action",
+    "order",
+  ]);
+  const unexpectedFields = slotStructure.children
+    .map((child) => child?.name)
+    .filter((name) => !supportedFields.has(name));
+
+  assertCondition(
+    unexpectedFields.length === 0,
+    `${label} contains unsupported fields: ${unexpectedFields.join(", ")}.`,
+  );
+
+  return {
+    enabled,
+    inputAction,
+    order,
+    slotId,
+  };
+}
+
+function buildSkillSlotCatalogFromProject(project) {
+  const skillSlotsData = readGlobalVariable(project, "skill_slots_data");
+
+  assertCondition(
+    skillSlotsData.type === "structure" &&
+      Array.isArray(skillSlotsData.children),
+    "Global variable skill_slots_data must have type structure.",
+  );
+
+  const slots = {};
+  const slotStructures = requireCatalogStructureChildren(
+    skillSlotsData,
+    "Global variable skill_slots_data",
+  );
+  const usedOrders = new Set();
+  const usedInputActions = new Set();
+  const controlBindings = readGlobalVariable(project, "ControlBindings");
+  const knownInputActions = new Set(
+    requireCatalogStructureChildren(
+      controlBindings,
+      "Global variable ControlBindings",
+    ).map((binding) => binding.name),
+  );
+
+  for (const slotStructure of slotStructures) {
+    const slotId = slotStructure.name;
+
+    assertCondition(
+      !Object.prototype.hasOwnProperty.call(slots, slotId),
+      `Duplicate skill slot ID in skill_slots_data: ${slotId}.`,
+    );
+
+    const slot = readSkillSlotDefinitionFromGDevelop(slotStructure);
+
+    assertCondition(
+      !usedOrders.has(slot.order),
+      `Duplicate skill slot order in skill_slots_data: ${slot.order}.`,
+    );
+    usedOrders.add(slot.order);
+
+    if (slot.inputAction !== "") {
+      assertCondition(
+        knownInputActions.has(slot.inputAction),
+        `${slotId}.input_action references missing ControlBindings action ${slot.inputAction}.`,
+      );
+      assertCondition(
+        !usedInputActions.has(slot.inputAction),
+        `Input action ${slot.inputAction} is assigned to more than one skill slot.`,
+      );
+      usedInputActions.add(slot.inputAction);
+    }
+
+    slots[slotId] = slot;
+  }
+
+  assertCondition(
+    Object.keys(slots).length > 0,
+    "Global variable skill_slots_data contains no slot definitions.",
+  );
+
+  return {
+    schemaVersion: SKILL_SLOT_CATALOG_SCHEMA_VERSION,
+    slots,
+  };
+}
+
 function readSkillDefinitionFromGDevelop(skill) {
   const skillID = skill.name;
   const label = `Global variable skills_data.${skillID}`;
@@ -2325,6 +2645,12 @@ function readSkillDefinitionFromGDevelop(skill) {
   const availableToAll = requireStructureChild(
     skill,
     "available_to_all",
+    "boolean",
+    label,
+  );
+  const loadoutEligible = requireStructureChild(
+    skill,
+    "loadout_eligible",
     "boolean",
     label,
   );
@@ -2472,6 +2798,7 @@ function readSkillDefinitionFromGDevelop(skill) {
     effects,
     enabled,
     id: skillID,
+    loadoutEligible,
     nameDisplay,
     resourceCost,
     resourceType: resourceType.toLowerCase(),
@@ -2525,9 +2852,10 @@ function buildSkillCatalogFromProject(project, sourceProject) {
   assertCondition(
     basicHeal.enabled === true &&
       basicHeal.availableToAll === true &&
+      basicHeal.loadoutEligible === false &&
       basicHeal.type === "healing" &&
       basicHeal.target === "self",
-    "skill_heal_basic must remain an enabled universal self-healing skill.",
+    "skill_heal_basic must remain an enabled universal self-healing skill outside SkillLoadout.",
   );
   assertCondition(
     basicHeal.resourceType === "none" &&
@@ -3415,6 +3743,485 @@ function summarizeColliders(extracted) {
   };
 }
 
+function readOptionalVariableDefinition(variables, name, expectedType, label) {
+  const entries = Array.isArray(variables) ? variables : [];
+  const matches = entries.filter((entry) => entry?.name === name);
+
+  assertCondition(matches.length <= 1, `${label}.${name} is duplicated.`);
+
+  if (matches.length === 0) {
+    return undefined;
+  }
+
+  assertCondition(
+    matches[0].type === expectedType,
+    `${label}.${name} must have type ${expectedType}.`,
+  );
+
+  if (expectedType === "array" || expectedType === "structure") {
+    return readGenericGDevelopVariable(matches[0], `${label}.${name}`);
+  }
+
+  return matches[0].value;
+}
+
+function readQuestAuthoringValue(instance, object, name, expectedType, fallback) {
+  const instanceValue = readOptionalVariableDefinition(
+    instance.initialVariables,
+    name,
+    expectedType,
+    `Instance ${instance.persistentUuid || instance.name}`,
+  );
+
+  if (instanceValue !== undefined) {
+    return instanceValue;
+  }
+
+  const objectValue = readOptionalVariableDefinition(
+    object.variables,
+    name,
+    expectedType,
+    `Object ${object.name}`,
+  );
+
+  return objectValue === undefined ? fallback : objectValue;
+}
+
+function extractQuestNpcs(layout, objectRegistry) {
+  const instances = layout.instances.filter((instance) =>
+    typeof instance?.name === "string" && instance.name.startsWith("npc_"),
+  );
+  const countsByObject = new Map();
+
+  for (const instance of instances) {
+    countsByObject.set(instance.name, (countsByObject.get(instance.name) ?? 0) + 1);
+  }
+
+  const seenIds = new Set();
+  const npcs = [];
+
+  for (const instance of instances) {
+    const { object } = objectRegistry.requireObject(instance.name);
+    const enabled = readQuestAuthoringValue(
+      instance,
+      object,
+      "QuestEnabled",
+      "boolean",
+      true,
+    );
+
+    if (!enabled) {
+      continue;
+    }
+
+    const configuredId = readQuestAuthoringValue(
+      instance,
+      object,
+      "QuestNpcID",
+      "string",
+      "",
+    );
+    const npcId = String(configuredId || "").trim() ||
+      (countsByObject.get(instance.name) === 1 ? instance.name : "");
+
+    assertCondition(
+      npcId.length > 0,
+      `${instance.name} has multiple instances and requires a unique QuestNpcID instance variable.`,
+    );
+    assertCondition(
+      /^[A-Za-z0-9_-]+$/.test(npcId),
+      `Quest NPC ID is invalid: ${npcId}.`,
+    );
+    assertCondition(!seenIds.has(npcId), `Duplicate Quest NPC ID: ${npcId}.`);
+    seenIds.add(npcId);
+
+    const interactionRadius = readQuestAuthoringValue(
+      instance,
+      object,
+      "QuestInteractionRadius",
+      "number",
+      64,
+    );
+    assertCondition(
+      typeof interactionRadius === "number" &&
+        Number.isFinite(interactionRadius) &&
+        interactionRadius > 0 &&
+        interactionRadius <= 512,
+      `${npcId}.QuestInteractionRadius must be a finite number from 1 to 512.`,
+    );
+
+    const displayName = String(
+      readQuestAuthoringValue(
+        instance,
+        object,
+        "QuestDisplayName",
+        "string",
+        npcId,
+      ) || npcId,
+    ).trim();
+    assertCondition(
+      displayName.length > 0 && !/[\u0000-\u001F\u007F]/.test(displayName),
+      `${npcId}.QuestDisplayName must be a valid non-empty string.`,
+    );
+
+    npcs.push({
+      displayName,
+      id: npcId,
+      interactionRadius,
+      mapId: MAP_ID,
+      objectName: instance.name,
+      x: assertFiniteNumber(instance.x, `${npcId}.x`),
+      y: assertFiniteNumber(instance.y, `${npcId}.y`),
+      source: {
+        instancePersistentUuid: instance.persistentUuid || "",
+        layer: instance.layer || "",
+        objectName: instance.name,
+      },
+    });
+  }
+
+  return npcs.sort((left, right) => compareStrings(left.id, right.id));
+}
+
+function extractQuestRegions(layout, objectRegistry) {
+  const instances = layout.instances.filter((instance) => instance?.name === "QuestRegion");
+  const seenIds = new Set();
+  const regions = [];
+
+  for (const instance of instances) {
+    const { object } = objectRegistry.requireObject(instance.name);
+    const enabled = readQuestAuthoringValue(
+      instance,
+      object,
+      "Enabled",
+      "boolean",
+      true,
+    );
+
+    if (!enabled) {
+      continue;
+    }
+
+    const regionId = String(
+      readQuestAuthoringValue(instance, object, "RegionID", "string", "") || "",
+    ).trim();
+
+    assertCondition(regionId.length > 0, "QuestRegion instance is missing RegionID.");
+    assertCondition(
+      /^[A-Za-z0-9_-]+$/.test(regionId),
+      `Quest region ID is invalid: ${regionId}.`,
+    );
+    assertCondition(!seenIds.has(regionId), `Duplicate quest RegionID: ${regionId}.`);
+    seenIds.add(regionId);
+
+    const displayName = String(
+      readQuestAuthoringValue(instance, object, "DisplayName", "string", regionId) ||
+        regionId,
+    ).trim();
+    assertCondition(
+      displayName.length > 0 && !/[\u0000-\u001F\u007F]/.test(displayName),
+      `${regionId}.DisplayName must be a valid non-empty string.`,
+    );
+
+    const regionType = String(
+      readQuestAuthoringValue(instance, object, "RegionType", "string", "hostile") ||
+        "hostile",
+    ).trim();
+    assertCondition(
+      regionType === "safe" || regionType === "hostile",
+      `${regionId}.RegionType must be safe or hostile.`,
+    );
+
+    const accessQuestId = String(
+      readQuestAuthoringValue(instance, object, "AccessQuestID", "string", "") || "",
+    ).trim();
+    const associatedQuestId = String(
+      readQuestAuthoringValue(instance, object, "AssociatedQuestID", "string", "") || "",
+    ).trim();
+    const musicKey = String(
+      readQuestAuthoringValue(instance, object, "MusicKey", "string", "") || "",
+    ).trim();
+    const pointOfInterestIds = readQuestAuthoringValue(
+      instance,
+      object,
+      "PointOfInterestIDs",
+      "array",
+      [],
+    );
+
+    for (const [label, value] of [
+      ["AccessQuestID", accessQuestId],
+      ["AssociatedQuestID", associatedQuestId],
+    ]) {
+      assertCondition(
+        value.length === 0 || /^[A-Za-z0-9_-]+$/.test(value),
+        `${regionId}.${label} must be empty or a canonical quest ID.`,
+      );
+    }
+    assertCondition(
+      !/[\u0000-\u001F\u007F]/.test(musicKey),
+      `${regionId}.MusicKey contains control characters.`,
+    );
+    assertCondition(
+      Array.isArray(pointOfInterestIds),
+      `${regionId}.PointOfInterestIDs must be an array.`,
+    );
+    const seenPointOfInterestIds = new Set();
+    const normalizedPointOfInterestIds = pointOfInterestIds.map((value, index) => {
+      assertCondition(
+        typeof value === "string" && /^[A-Za-z0-9_-]+$/.test(value.trim()),
+        `${regionId}.PointOfInterestIDs[${index}] must be a canonical ID.`,
+      );
+      const id = value.trim();
+      assertCondition(
+        !seenPointOfInterestIds.has(id),
+        `${regionId}.PointOfInterestIDs contains duplicate ${id}.`,
+      );
+      seenPointOfInterestIds.add(id);
+      return id;
+    });
+
+    const width = assertFiniteNumber(instance.width, `${regionId}.width`);
+    const height = assertFiniteNumber(instance.height, `${regionId}.height`);
+    assertCondition(width > 0 && height > 0, `${regionId} must have positive width and height.`);
+    assertCondition(
+      !instance.angle || instance.angle === 0,
+      `${regionId} uses unsupported non-zero rotation.`,
+    );
+
+    const minX = assertFiniteNumber(instance.x, `${regionId}.x`);
+    const minY = assertFiniteNumber(instance.y, `${regionId}.y`);
+
+    regions.push({
+      accessQuestId,
+      associatedQuestId,
+      bounds: {
+        minX,
+        maxX: minX + width,
+        minY,
+        maxY: minY + height,
+      },
+      displayName,
+      id: regionId,
+      mapId: MAP_ID,
+      musicKey,
+      pointOfInterestIds: normalizedPointOfInterestIds,
+      regionType,
+      sourceInstancePersistentUuid: instance.persistentUuid || "",
+      sourceObjectName: instance.name,
+    });
+  }
+
+  return regions.sort((left, right) => compareStrings(left.id, right.id));
+}
+
+function requireQuestId(value, label, allowEmpty = false) {
+  assertCondition(typeof value === "string", `${label} must be a string.`);
+  const result = value.trim();
+  assertCondition(allowEmpty || result.length > 0, `${label} cannot be empty.`);
+  assertCondition(
+    result.length === 0 || /^[A-Za-z0-9_-]+$/.test(result),
+    `${label} must use only letters, numbers, underscores, and hyphens.`,
+  );
+  return result;
+}
+
+function requireQuestInteger(value, label, minimum = 0) {
+  assertCondition(
+    typeof value === "number" && Number.isSafeInteger(value) && value >= minimum,
+    `${label} must be an integer >= ${minimum}.`,
+  );
+  return value;
+}
+
+function requireQuestBoolean(value, label) {
+  assertCondition(typeof value === "boolean", `${label} must be boolean.`);
+  return value;
+}
+
+function requireQuestText(value, label, allowEmpty = false) {
+  assertCondition(typeof value === "string", `${label} must be a string.`);
+  const result = value.trim();
+  assertCondition(allowEmpty || result.length > 0, `${label} cannot be empty.`);
+  assertCondition(!/[\u0000-\u001F\u007F]/.test(result), `${label} contains control characters.`);
+  return result;
+}
+
+function buildQuestCatalogFromProject(
+  project,
+  sourceProject,
+  worldArtifact,
+  itemCatalog,
+  monsterCatalog,
+) {
+  const root = readGlobalVariable(project, "quests_data");
+  assertCondition(
+    root.type === "structure" && Array.isArray(root.children),
+    "Global variable quests_data must have type structure.",
+  );
+
+  const itemIds = new Set(Object.keys(itemCatalog.definitions));
+  const monsterIds = new Set(Object.keys(monsterCatalog.definitions));
+  const npcIds = new Set(worldArtifact.npcs.map((npc) => npc.id));
+  const regionIds = new Set([
+    ...worldArtifact.questRegions.map((region) => region.id),
+    ...worldArtifact.spawnRegions.map((region) => region.id),
+  ]);
+  const definitions = {};
+  const questChildren = requireCatalogStructureChildren(root, "quests_data");
+
+  for (const questVariable of questChildren) {
+    const questId = requireQuestId(questVariable.name, `quests_data.${questVariable.name}`);
+    const raw = readGenericGDevelopVariable(
+      questVariable,
+      `quests_data.${questId}`,
+    );
+
+    const exportedQuestId = requireQuestId(raw.quest_id, `${questId}.quest_id`);
+    assertCondition(exportedQuestId === questId, `${questId}.quest_id must match its catalog key.`);
+
+    const offerNpcId = requireQuestId(raw.offer_npc_id, `${questId}.offer_npc_id`);
+    assertCondition(npcIds.has(offerNpcId), `${questId}.offer_npc_id references unknown NPC ${offerNpcId}.`);
+
+    assertCondition(raw.turn_in && typeof raw.turn_in === "object" && !Array.isArray(raw.turn_in), `${questId}.turn_in must be a structure.`);
+    const turnInType = requireQuestText(raw.turn_in.type, `${questId}.turn_in.type`);
+    assertCondition(turnInType === "npc" || turnInType === "auto", `${questId}.turn_in.type must be npc or auto.`);
+    const turnInTargetId = requireQuestId(
+      raw.turn_in.target_id,
+      `${questId}.turn_in.target_id`,
+      turnInType === "auto",
+    );
+    if (turnInType === "npc") {
+      assertCondition(npcIds.has(turnInTargetId), `${questId}.turn_in.target_id references unknown NPC ${turnInTargetId}.`);
+    }
+
+    assertCondition(Array.isArray(raw.prerequisites), `${questId}.prerequisites must be an array.`);
+    const prerequisiteSet = new Set();
+    const prerequisites = raw.prerequisites.map((entry, index) => {
+      const id = requireQuestId(entry, `${questId}.prerequisites[${index}]`);
+      assertCondition(!prerequisiteSet.has(id), `${questId}.prerequisites contains duplicate ${id}.`);
+      prerequisiteSet.add(id);
+      return id;
+    });
+
+    assertCondition(Array.isArray(raw.objectives) && raw.objectives.length > 0, `${questId}.objectives must contain at least one objective.`);
+    const objectiveIds = new Set();
+    const objectives = raw.objectives.map((objective, index) => {
+      assertCondition(objective && typeof objective === "object" && !Array.isArray(objective), `${questId}.objectives[${index}] must be a structure.`);
+      const objectiveId = requireQuestId(objective.objective_id, `${questId}.objectives[${index}].objective_id`);
+      assertCondition(!objectiveIds.has(objectiveId), `${questId}.objectives contains duplicate objective ID ${objectiveId}.`);
+      objectiveIds.add(objectiveId);
+      const type = requireQuestText(objective.type, `${questId}.${objectiveId}.type`);
+      assertCondition(["talk", "kill", "collect", "explore", "deliver"].includes(type), `${questId}.${objectiveId}.type is unknown: ${type}.`);
+      const targetId = requireQuestId(objective.target_id, `${questId}.${objectiveId}.target_id`);
+      const quantity = requireQuestInteger(objective.quantity, `${questId}.${objectiveId}.quantity`, 1);
+      const order = requireQuestInteger(objective.order, `${questId}.${objectiveId}.order`, 0);
+
+      if (type === "talk") assertCondition(npcIds.has(targetId), `${questId}.${objectiveId} references unknown NPC ${targetId}.`);
+      if (type === "kill") assertCondition(monsterIds.has(targetId), `${questId}.${objectiveId} references unknown monster ${targetId}.`);
+      if (type === "collect" || type === "deliver") assertCondition(itemIds.has(targetId), `${questId}.${objectiveId} references unknown item ${targetId}.`);
+      if (type === "explore") assertCondition(regionIds.has(targetId), `${questId}.${objectiveId} references unknown region ${targetId}.`);
+
+      return { id: objectiveId, order, quantity, targetId, type };
+    }).sort((left, right) => left.order - right.order || compareStrings(left.id, right.id));
+
+    assertCondition(raw.rewards && typeof raw.rewards === "object" && !Array.isArray(raw.rewards), `${questId}.rewards must be a structure.`);
+    assertCondition(Array.isArray(raw.rewards.items), `${questId}.rewards.items must be an array.`);
+    const rewardItems = raw.rewards.items.map((entry, index) => {
+      assertCondition(entry && typeof entry === "object" && !Array.isArray(entry), `${questId}.rewards.items[${index}] must be a structure.`);
+      const itemId = requireQuestId(entry.item_id, `${questId}.rewards.items[${index}].item_id`);
+      assertCondition(itemIds.has(itemId), `${questId}.rewards.items references unknown item ${itemId}.`);
+      return { itemId, quantity: requireQuestInteger(entry.quantity, `${questId}.rewards.items[${index}].quantity`, 1) };
+    });
+
+    const nextQuestId = requireQuestId(raw.next_quest_id, `${questId}.next_quest_id`, true);
+    const initialState = requireQuestText(raw.initial_state, `${questId}.initial_state`);
+    assertCondition(initialState === "locked" || initialState === "available", `${questId}.initial_state must be locked or available.`);
+    assertCondition(raw.dialogue && typeof raw.dialogue === "object" && !Array.isArray(raw.dialogue), `${questId}.dialogue must be a structure.`);
+    assertCondition(raw.credit && typeof raw.credit === "object" && !Array.isArray(raw.credit), `${questId}.credit must be a structure.`);
+    const creditMode = requireQuestText(raw.credit.mode, `${questId}.credit.mode`);
+    assertCondition(creditMode === "solo", `${questId}.credit.mode currently supports only solo.`);
+
+    definitions[questId] = {
+      credit: { mode: creditMode },
+      description: requireQuestText(raw.description, `${questId}.description`),
+      dialogue: {
+        active: requireQuestText(raw.dialogue.active, `${questId}.dialogue.active`, true),
+        completed: requireQuestText(raw.dialogue.completed, `${questId}.dialogue.completed`, true),
+        offer: requireQuestText(raw.dialogue.offer, `${questId}.dialogue.offer`, true),
+        ready: requireQuestText(raw.dialogue.ready, `${questId}.dialogue.ready`, true),
+      },
+      initialState,
+      nextQuestId,
+      objectives,
+      offerNpcId,
+      prerequisites,
+      questId,
+      repeatable: requireQuestBoolean(raw.repeatable, `${questId}.repeatable`),
+      rewards: {
+        gem: requireQuestInteger(raw.rewards.gem, `${questId}.rewards.gem`, 0),
+        gold: requireQuestInteger(raw.rewards.gold, `${questId}.rewards.gold`, 0),
+        items: rewardItems,
+        xp: requireQuestInteger(raw.rewards.xp, `${questId}.rewards.xp`, 0),
+      },
+      title: requireQuestText(raw.title, `${questId}.title`),
+      trackingAllowed: requireQuestBoolean(raw.tracking_allowed, `${questId}.tracking_allowed`),
+      turnIn: { targetId: turnInTargetId, type: turnInType },
+    };
+  }
+
+  const questIds = new Set(Object.keys(definitions));
+
+  for (const region of worldArtifact.questRegions) {
+    for (const [label, questId] of [
+      ["AccessQuestID", region.accessQuestId || ""],
+      ["AssociatedQuestID", region.associatedQuestId || ""],
+    ]) {
+      if (questId) {
+        assertCondition(
+          questIds.has(questId),
+          `${region.id}.${label} references missing quest ${questId}.`,
+        );
+      }
+    }
+  }
+
+  for (const definition of Object.values(definitions)) {
+    for (const prerequisite of definition.prerequisites) {
+      assertCondition(questIds.has(prerequisite), `${definition.questId} references missing prerequisite ${prerequisite}.`);
+      assertCondition(prerequisite !== definition.questId, `${definition.questId} cannot require itself.`);
+    }
+    if (definition.nextQuestId) {
+      assertCondition(questIds.has(definition.nextQuestId), `${definition.questId} references missing next quest ${definition.nextQuestId}.`);
+      assertCondition(definition.nextQuestId !== definition.questId, `${definition.questId} cannot point to itself.`);
+    }
+  }
+
+  const assertAcyclic = (label, edgesFor) => {
+    const visiting = new Set();
+    const visited = new Set();
+    const visit = (questId) => {
+      if (visited.has(questId)) return;
+      assertCondition(!visiting.has(questId), `Quest ${label} contains a cycle involving ${questId}.`);
+      visiting.add(questId);
+      for (const nextId of edgesFor(definitions[questId])) visit(nextId);
+      visiting.delete(questId);
+      visited.add(questId);
+    };
+    for (const questId of Object.keys(definitions)) visit(questId);
+  };
+
+  assertAcyclic("prerequisites", (definition) => definition.prerequisites);
+  assertAcyclic("chain", (definition) => definition.nextQuestId ? [definition.nextQuestId] : []);
+
+  return {
+    catalogSchemaVersion: QUEST_CATALOG_SCHEMA_VERSION,
+    definitions,
+    source: { project: sourceProject },
+  };
+}
+
+
 export function buildWorldArtifact({ projectPath }) {
   assertCondition(
     typeof projectPath === "string" && projectPath.length > 0,
@@ -3466,14 +4273,23 @@ export function buildWorldArtifact({ projectPath }) {
     objectRegistry,
     resourceRegistry,
   );
+  const npcs = extractQuestNpcs(layout, objectRegistry);
+  const questRegions = extractQuestRegions(layout, objectRegistry);
 
   const knownMonsterTypes = new Set(monsterMembership.monsterTypes);
+  const questRegionIds = new Set(questRegions.map((region) => region.id));
 
   spawnRegions.forEach((region) => {
     assertCondition(
       knownMonsterTypes.has(region.mobType),
       `${region.id}.MobType ${region.mobType} is not present in any supported monster behavior group.`,
     );
+    if (region.questRegionId) {
+      assertCondition(
+        questRegionIds.has(region.questRegionId),
+        `${region.id}.QuestRegionID references unknown QuestRegion ${region.questRegionId}.`,
+      );
+    }
   });
 
   const bodies = extractBodyProfiles(
@@ -3588,6 +4404,8 @@ export function buildWorldArtifact({ projectPath }) {
     exporterVersion: EXPORTER_VERSION,
     mapContext: tileContext.context,
     mapId: MAP_ID,
+    npcs,
+    questRegions,
     spawnRegions,
     source: {
       project: {
@@ -3691,6 +4509,70 @@ export function buildItemCatalog({ projectPath }) {
 }
 
 
+
+export function buildClassCatalog({ projectPath }) {
+  assertCondition(
+    typeof projectPath === "string" && projectPath.length > 0,
+    "A canonical GDevelop project path is required.",
+  );
+
+  const absoluteProjectPath = resolve(projectPath);
+
+  assertCondition(existsSync(absoluteProjectPath), `Canonical project is missing: ${projectPath}`);
+  assertCondition(
+    basename(absoluteProjectPath) === EXPECTED_PROJECT_FILE,
+    `Only ${EXPECTED_PROJECT_FILE} may be used as the canonical source.`,
+  );
+
+  const projectBytes = readFileSync(absoluteProjectPath);
+  const project = parseJson(projectBytes, EXPECTED_PROJECT_FILE);
+
+  assertCondition(
+    project.firstLayout === EXPECTED_FIRST_LAYOUT,
+    `firstLayout must remain ${EXPECTED_FIRST_LAYOUT}.`,
+  );
+
+  const catalog = buildClassCatalogFromProject(project);
+
+  validateJsonValue(catalog);
+  assertNoAbsolutePaths(catalog);
+
+  return catalog;
+}
+
+export function buildSkillSlotCatalog({ projectPath }) {
+  assertCondition(
+    typeof projectPath === "string" && projectPath.length > 0,
+    "A canonical GDevelop project path is required.",
+  );
+
+  const absoluteProjectPath = resolve(projectPath);
+
+  assertCondition(
+    existsSync(absoluteProjectPath),
+    `Canonical project is missing: ${projectPath}`,
+  );
+  assertCondition(
+    basename(absoluteProjectPath) === EXPECTED_PROJECT_FILE,
+    `Only ${EXPECTED_PROJECT_FILE} may be used as the canonical source.`,
+  );
+
+  const projectBytes = readFileSync(absoluteProjectPath);
+  const project = parseJson(projectBytes, EXPECTED_PROJECT_FILE);
+
+  assertCondition(
+    project.firstLayout === EXPECTED_FIRST_LAYOUT,
+    `firstLayout must remain ${EXPECTED_FIRST_LAYOUT}.`,
+  );
+
+  const catalog = buildSkillSlotCatalogFromProject(project);
+
+  validateJsonValue(catalog);
+  assertNoAbsolutePaths(catalog);
+
+  return catalog;
+}
+
 export function buildSkillCatalog({ projectPath }) {
   assertCondition(
     typeof projectPath === "string" && projectPath.length > 0,
@@ -3724,6 +4606,43 @@ export function buildSkillCatalog({ projectPath }) {
   validateJsonValue(catalog);
   assertNoAbsolutePaths(catalog);
 
+  return catalog;
+}
+
+export function buildQuestCatalog({ projectPath }) {
+  assertCondition(
+    typeof projectPath === "string" && projectPath.length > 0,
+    "A canonical GDevelop project path is required.",
+  );
+
+  const absoluteProjectPath = resolve(projectPath);
+  assertCondition(existsSync(absoluteProjectPath), `Canonical project is missing: ${projectPath}`);
+  assertCondition(
+    basename(absoluteProjectPath) === EXPECTED_PROJECT_FILE,
+    `Only ${EXPECTED_PROJECT_FILE} may be used as the canonical source.`,
+  );
+
+  const projectBytes = readFileSync(absoluteProjectPath);
+  const normalizedProjectBytes = normalizeJsonSourceBytes(projectBytes);
+  const project = parseJson(projectBytes, EXPECTED_PROJECT_FILE);
+  const sourceProject = {
+    file: EXPECTED_PROJECT_FILE,
+    sha256: sha256(normalizedProjectBytes),
+    sizeBytes: normalizedProjectBytes.length,
+  };
+  const worldArtifact = buildWorldArtifact({ projectPath });
+  const itemCatalog = buildItemCatalog({ projectPath });
+  const monsterCatalog = buildMonsterCatalog({ projectPath });
+  const catalog = buildQuestCatalogFromProject(
+    project,
+    sourceProject,
+    worldArtifact,
+    itemCatalog,
+    monsterCatalog,
+  );
+
+  validateJsonValue(catalog);
+  assertNoAbsolutePaths(catalog);
   return catalog;
 }
 
@@ -3992,6 +4911,12 @@ function runCli(argv) {
   const secondItemCatalog = buildItemCatalog({ projectPath });
   const firstSkillCatalog = buildSkillCatalog({ projectPath });
   const secondSkillCatalog = buildSkillCatalog({ projectPath });
+  const firstClassCatalog = buildClassCatalog({ projectPath });
+  const secondClassCatalog = buildClassCatalog({ projectPath });
+  const firstSkillSlotCatalog = buildSkillSlotCatalog({ projectPath });
+  const secondSkillSlotCatalog = buildSkillSlotCatalog({ projectPath });
+  const firstQuestCatalog = buildQuestCatalog({ projectPath });
+  const secondQuestCatalog = buildQuestCatalog({ projectPath });
   const generatedText = serializeWorldArtifact(firstArtifact);
   const repeatedText = serializeWorldArtifact(secondArtifact);
   const generatedMonsterCatalogText = serializeMonsterCatalog(firstMonsterCatalog);
@@ -4000,6 +4925,14 @@ function runCli(argv) {
   const repeatedItemCatalogText = serializeItemCatalog(secondItemCatalog);
   const generatedSkillCatalogText = serializeSkillCatalog(firstSkillCatalog);
   const repeatedSkillCatalogText = serializeSkillCatalog(secondSkillCatalog);
+  const generatedClassCatalogText = serializeClassCatalog(firstClassCatalog);
+  const repeatedClassCatalogText = serializeClassCatalog(secondClassCatalog);
+  const generatedSkillSlotCatalogText =
+    serializeSkillSlotCatalog(firstSkillSlotCatalog);
+  const repeatedSkillSlotCatalogText =
+    serializeSkillSlotCatalog(secondSkillSlotCatalog);
+  const generatedQuestCatalogText = serializeQuestCatalog(firstQuestCatalog);
+  const repeatedQuestCatalogText = serializeQuestCatalog(secondQuestCatalog);
 
   assertCondition(
     generatedText === repeatedText,
@@ -4016,6 +4949,18 @@ function runCli(argv) {
   assertCondition(
     generatedSkillCatalogText === repeatedSkillCatalogText,
     "Skill catalog output is unstable for unchanged source bytes.",
+  );
+  assertCondition(
+    generatedClassCatalogText === repeatedClassCatalogText,
+    "Class catalog output is unstable for unchanged source bytes.",
+  );
+  assertCondition(
+    generatedSkillSlotCatalogText === repeatedSkillSlotCatalogText,
+    "Skill slot catalog output is unstable for unchanged source bytes.",
+  );
+  assertCondition(
+    generatedQuestCatalogText === repeatedQuestCatalogText,
+    "Quest catalog output is unstable for unchanged source bytes.",
   );
 
   assertMonsterDropItemsExist(firstMonsterCatalog, firstItemCatalog);
@@ -4050,10 +4995,40 @@ function runCli(argv) {
         readFileSync(DEFAULT_SKILL_CATALOG_PATH, "utf8"),
       "The committed skill catalog is stale. Run the exporter and review the diff.",
     );
+    assertCondition(
+      existsSync(DEFAULT_CLASS_CATALOG_PATH),
+      `Committed class catalog is missing: ${DEFAULT_CLASS_CATALOG_PATH}`,
+    );
+    assertCondition(
+      generatedClassCatalogText ===
+        readFileSync(DEFAULT_CLASS_CATALOG_PATH, "utf8"),
+      "The committed class catalog is stale. Run the exporter and review the diff.",
+    );
+    assertCondition(
+      existsSync(DEFAULT_SKILL_SLOT_CATALOG_PATH),
+      `Committed skill slot catalog is missing: ${DEFAULT_SKILL_SLOT_CATALOG_PATH}`,
+    );
+    assertCondition(
+      generatedSkillSlotCatalogText ===
+        readFileSync(DEFAULT_SKILL_SLOT_CATALOG_PATH, "utf8"),
+      "The committed skill slot catalog is stale. Run the exporter and review the diff.",
+    );
+    assertCondition(
+      existsSync(DEFAULT_QUEST_CATALOG_PATH),
+      `Committed quest catalog is missing: ${DEFAULT_QUEST_CATALOG_PATH}`,
+    );
+    assertCondition(
+      generatedQuestCatalogText ===
+        readFileSync(DEFAULT_QUEST_CATALOG_PATH, "utf8"),
+      "The committed quest catalog is stale. Run the exporter and review the diff.",
+    );
     console.log(`World artifact is current: ${outputPath}`);
     console.log(`Monster catalog is current: ${DEFAULT_MONSTER_CATALOG_PATH}`);
     console.log(`Item catalog is current: ${DEFAULT_ITEM_CATALOG_PATH}`);
     console.log(`Skill catalog is current: ${DEFAULT_SKILL_CATALOG_PATH}`);
+    console.log(`Class catalog is current: ${DEFAULT_CLASS_CATALOG_PATH}`);
+    console.log(`Skill slot catalog is current: ${DEFAULT_SKILL_SLOT_CATALOG_PATH}`);
+    console.log(`Quest catalog is current: ${DEFAULT_QUEST_CATALOG_PATH}`);
   } else {
     mkdirSync(dirname(outputPath), { recursive: true });
     writeFileSync(outputPath, generatedText, "utf8");
@@ -4075,10 +5050,31 @@ function runCli(argv) {
       generatedSkillCatalogText,
       "utf8",
     );
+    mkdirSync(dirname(DEFAULT_CLASS_CATALOG_PATH), { recursive: true });
+    writeFileSync(
+      DEFAULT_CLASS_CATALOG_PATH,
+      generatedClassCatalogText,
+      "utf8",
+    );
+    mkdirSync(dirname(DEFAULT_SKILL_SLOT_CATALOG_PATH), { recursive: true });
+    writeFileSync(
+      DEFAULT_SKILL_SLOT_CATALOG_PATH,
+      generatedSkillSlotCatalogText,
+      "utf8",
+    );
+    mkdirSync(dirname(DEFAULT_QUEST_CATALOG_PATH), { recursive: true });
+    writeFileSync(
+      DEFAULT_QUEST_CATALOG_PATH,
+      generatedQuestCatalogText,
+      "utf8",
+    );
     console.log(`World artifact exported: ${outputPath}`);
     console.log(`Monster catalog exported: ${DEFAULT_MONSTER_CATALOG_PATH}`);
     console.log(`Item catalog exported: ${DEFAULT_ITEM_CATALOG_PATH}`);
     console.log(`Skill catalog exported: ${DEFAULT_SKILL_CATALOG_PATH}`);
+    console.log(`Class catalog exported: ${DEFAULT_CLASS_CATALOG_PATH}`);
+    console.log(`Skill slot catalog exported: ${DEFAULT_SKILL_SLOT_CATALOG_PATH}`);
+    console.log(`Quest catalog exported: ${DEFAULT_QUEST_CATALOG_PATH}`);
   }
 
   if (svgPath) {

@@ -28,6 +28,33 @@
       "targetStopDistance": 16,
       "xpReward": 50
     },
+    "mob_boar_guardian": {
+      "attack": {
+        "damage": 10,
+        "durationMs": 400,
+        "hitDelayMs": 240,
+        "intervalMs": 1800,
+        "range": 32
+      },
+      "behaviors": {
+        "chaseAndAttack": true,
+        "fleeOnHit": false,
+        "randomDirection": true
+      },
+      "bodyProfileId": "mob_boar_guardian",
+      "deathDurationMs": 480,
+      "detectionRadius": 160,
+      "disengageRadius": 240,
+      "drops": null,
+      "hurtDurationMs": 320,
+      "maxHealth": 40,
+      "movementSpeed": 18,
+      "patrolRadius": 72,
+      "reactionMode": "chase",
+      "reactionSpeed": 58,
+      "targetStopDistance": 16,
+      "xpReward": 80
+    },
     "mob_hare": {
       "attack": null,
       "behaviors": {
@@ -46,14 +73,14 @@
             "items": [
               {
                 "guaranteed": false,
-                "itemID": "item_test",
-                "maxQuantity": 5,
+                "itemID": "rabbit_skin",
+                "maxQuantity": 1,
                 "minQuantity": 1,
                 "weight": 1
               }
             ],
             "name": "common",
-            "weight": 70
+            "weight": 100
           }
         ],
         "rolls": 1
@@ -72,8 +99,8 @@
   "source": {
     "project": {
       "file": "RPG-2D-project-Grandoria-Colyseus-authoritative-inventory-equipment.json",
-      "sha256": "5e4c1a90a7d23232a548581a325e62eec174ab9e35dde3c3f0e5113e3656193d",
-      "sizeBytes": 5789515
+      "sha256": "dc53a7d0c13a2825c96e8ede499537acc7b24f900a88c66c4f377aa90e5e9ed1",
+      "sizeBytes": 6390437
     }
   }
 }

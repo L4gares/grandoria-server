@@ -32,6 +32,21 @@ import {
 } from "../skills/SkillCatalog.js";
 
 import {
+  normalizeSkillLoadout,
+  planSkillLoadoutAssignment,
+  type SkillLoadoutData,
+} from "../skills/SkillLoadout.js";
+
+import {
+  resolveClassSkillAccess,
+} from "../skills/ClassSkillAccess.js";
+
+import {
+  getClassDefinition,
+  getClassDefinitions,
+} from "../classes/ClassCatalog.js";
+
+import {
   getMonsterDefinition,
   type MonsterAttackDefinition,
   type MonsterDefinition,
@@ -49,6 +64,30 @@ import {
   type MonsterSpawnRegion,
 } from "../world/WorldCollision.js";
 
+import {
+  getWorldQuestNpc,
+  getWorldQuestRegion,
+  isPointInsideWorldQuestRegion,
+} from "../world/WorldQuestContext.js";
+
+import {
+  getQuestDefinition,
+  getQuestDefinitions,
+} from "../quests/QuestCatalog.js";
+
+import { QuestService } from "../quests/QuestService.js";
+
+import {
+  cloneQuestProgress,
+  markQuestRequestProcessed,
+  normalizeQuestProgress,
+  replaceQuestProgress,
+} from "../quests/QuestProgress.js";
+
+import { persistQuestProgress } from "../quests/QuestPersistence.js";
+
+import type { QuestProgressData } from "../quests/QuestTypes.js";
+
 type InputMessage = {
   left?: unknown;
   right?: unknown;
@@ -61,6 +100,11 @@ type AttackMessage = {
   MonsterID?: unknown;
   targetId?: unknown;
   TargetID?: unknown;
+};
+
+type ChatSendMessage = {
+  text?: unknown;
+  Text?: unknown;
 };
 
 type DropItemMessage = {
@@ -165,6 +209,37 @@ type SkillUseMessage = {
   SkillID?: unknown;
 };
 
+type SetSkillLoadoutSlotMessage = {
+  requestId?: unknown;
+  RequestID?: unknown;
+  slotId?: unknown;
+  slotID?: unknown;
+  SlotId?: unknown;
+  SlotID?: unknown;
+  skillID?: unknown;
+  skillId?: unknown;
+  SkillID?: unknown;
+};
+
+type QuestRequestMessage = {
+  requestId?: unknown;
+  RequestID?: unknown;
+  questId?: unknown;
+  questID?: unknown;
+  QuestID?: unknown;
+  npcId?: unknown;
+  npcID?: unknown;
+  NpcID?: unknown;
+};
+
+type QuestInteractMessage = {
+  requestId?: unknown;
+  RequestID?: unknown;
+  npcId?: unknown;
+  npcID?: unknown;
+  NpcID?: unknown;
+};
+
 type PlayerIdentity = {
   playerUid: string;
   characterId: string;
@@ -185,6 +260,7 @@ type PlayerAttributeValues = {
 type AuthenticatedPlayer = {
   uid: string;
   characterId: string;
+  classId: string;
   level: number;
   experience: number;
   unspentAttributePoints: number;
@@ -216,6 +292,10 @@ type AuthenticatedPlayer = {
   };
 
   skillCooldowns: Record<string, number>;
+
+  skillLoadout: SkillLoadoutData;
+
+  questProgress: QuestProgressData;
 };
 
 type EquipmentSlotName =
@@ -332,6 +412,8 @@ const MONSTER_DROP_MAX_RADIUS = 36;
 const MONSTER_DROP_POSITION_ATTEMPTS = 32;
 const MONSTER_DROP_FALLBACK_MAX_RING = 4;
 const MAX_ITEM_REQUEST_ID_LENGTH = 128;
+const MAX_CHAT_MESSAGE_LENGTH = 160;
+const CHAT_MESSAGE_MIN_INTERVAL_MS = 500;
 const FIXED_TIME_STEP = 1000 / 60;
 const MONSTER_PATROL_MIN_DURATION_MS = 2_000;
 const MONSTER_PATROL_MAX_DURATION_MS = 10_000;
@@ -467,6 +549,59 @@ function readSafeStringFromAliases(
   }
 
   return "";
+}
+
+function normalizeChatMessage(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  return value
+    .replace(/[\u0000-\u001F\u007F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_CHAT_MESSAGE_LENGTH);
+}
+
+type ResolvedCharacterClass = {
+  classId: string;
+  needsPersistence: boolean;
+};
+
+function resolveCharacterClass(
+  values: unknown[],
+): ResolvedCharacterClass | null {
+  const persistedClassId = readSafeStringFromAliases(values, 64);
+
+  if (persistedClassId) {
+    const definition = getClassDefinition(persistedClassId);
+
+    if (!definition) {
+      return null;
+    }
+
+    return {
+      classId: definition.classId,
+      needsPersistence: definition.classId !== persistedClassId,
+    };
+  }
+
+  /*
+   * Legacy migration is intentionally safe and catalog-driven.
+   * A character without ClassId can only be migrated automatically while
+   * the catalog has exactly one class. Once multiple classes exist, the
+   * server refuses to guess which class an old character belongs to.
+   */
+  const definitions = getClassDefinitions();
+
+  if (definitions.length !== 1) {
+    return null;
+  }
+
+  return {
+    classId: definitions[0].classId,
+    needsPersistence: true,
+  };
 }
 
 function readAppearanceValue(value: unknown, fallback: string): string {
@@ -606,6 +741,22 @@ function addPlayerAttributeValues(
     Armor: first.Armor + second.Armor,
     CriticalChance: first.CriticalChance + second.CriticalChance,
   };
+}
+
+function playerAttributeValuesEqual(
+  first: Readonly<PlayerAttributeValues>,
+  second: Readonly<PlayerAttributeValues>,
+): boolean {
+  return (
+    first.AttackPower === second.AttackPower &&
+    first.MagicPower === second.MagicPower &&
+    first.HealingPower === second.HealingPower &&
+    first.Agility === second.Agility &&
+    first.Vitality === second.Vitality &&
+    first.Regeneration === second.Regeneration &&
+    first.Armor === second.Armor &&
+    first.CriticalChance === second.CriticalChance
+  );
 }
 
 function applyPlayerAttributeValues(
@@ -1314,6 +1465,9 @@ export class MyRoom extends Room<{
     let authenticatedCurrencies: AuthenticatedPlayer["currencies"] | null = null;
     let authenticatedResources: AuthenticatedPlayer["resources"] | null = null;
     let authenticatedSkillCooldowns: Record<string, number> = {};
+    let authenticatedSkillLoadout: SkillLoadoutData | null = null;
+    let authenticatedQuestProgress = normalizeQuestProgress(undefined);
+    let authenticatedClassId = "";
     let authenticatedLevel = 1;
     let authenticatedExperience = 0;
     let authenticatedUnspentAttributePoints = 0;
@@ -1342,15 +1496,108 @@ export class MyRoom extends Room<{
   const characterData =
     readObject(characterSnapshot.data());
 
+  const resolvedClass = resolveCharacterClass([
+    characterData.ClassId,
+    characterData.classId,
+    characterData.ClassID,
+    characterData.classID,
+  ]);
+
+  if (!resolvedClass) {
+    console.warn(
+      "[Grandoria] Authentication rejected: character class is missing, unknown, or ambiguous.",
+      {
+        characterId,
+        persistedClassId: readSafeStringFromAliases(
+          [
+            characterData.ClassId,
+            characterData.classId,
+            characterData.ClassID,
+            characterData.classID,
+          ],
+          64,
+        ),
+      },
+    );
+
+    throw new ServerError(
+      ErrorCode.AUTH_FAILED,
+      "Authentication failed.",
+    );
+  }
+
+  authenticatedClassId = resolvedClass.classId;
+
+  if (resolvedClass.needsPersistence) {
+    await characterSnapshot.ref.update({
+      ClassId: authenticatedClassId,
+    });
+
+    console.log(
+      "[Grandoria] Character ClassId normalized and persisted:",
+      {
+        characterId,
+        classId: authenticatedClassId,
+      },
+    );
+  }
+
+  const classDefinition = getClassDefinition(authenticatedClassId);
+
+  if (!classDefinition) {
+    console.warn(
+      "[Grandoria] Authentication rejected: resolved character class is no longer available.",
+      {
+        characterId,
+        classId: authenticatedClassId,
+      },
+    );
+
+    throw new ServerError(
+      ErrorCode.AUTH_FAILED,
+      "Authentication failed.",
+    );
+  }
+
   const attributesData = readObject(
     characterData.Attributes ?? characterData.attributes,
   );
+
+  /*
+   * Base attributes are class-authoritative.
+   * The editable source is classes_data in GDevelop, exported to classes.json
+   * and validated by ClassCatalog. Firestore keeps a synchronized copy only;
+   * it is not the source of truth for Base.
+   */
   const baseAttributes = readPlayerAttributeValues(
+    classDefinition.baseAttributes,
+  );
+  const persistedBaseAttributes = readPlayerAttributeValues(
     attributesData.Base ?? attributesData.base,
   );
   const allocatedAttributes = readPlayerAttributeValues(
     attributesData.Allocated ?? attributesData.allocated,
   );
+
+  if (
+    !playerAttributeValuesEqual(
+      persistedBaseAttributes,
+      baseAttributes,
+    )
+  ) {
+    await characterSnapshot.ref.update({
+      "Attributes.Base": baseAttributes,
+    });
+
+    console.log(
+      "[Grandoria] Character base attributes synchronized from class catalog:",
+      {
+        characterId,
+        classId: authenticatedClassId,
+        baseAttributes,
+      },
+    );
+  }
 
   authenticatedLevel = Math.max(
     1,
@@ -1448,6 +1695,52 @@ export class MyRoom extends Room<{
     characterData.SkillCooldowns ?? characterData.skillCooldowns,
   );
 
+  /*
+   * SkillLoadout is character-specific, but its slot structure is driven by
+   * the generated skill-slot catalog. Missing/legacy characters are migrated
+   * to the current slot structure without equipping any skill automatically.
+   */
+  const normalizedSkillLoadout = normalizeSkillLoadout(
+    characterData.SkillLoadout ?? characterData.skillLoadout,
+  );
+
+  authenticatedSkillLoadout = normalizedSkillLoadout.loadout;
+
+  if (normalizedSkillLoadout.needsPersistence) {
+    await characterSnapshot.ref.update({
+      SkillLoadout: authenticatedSkillLoadout,
+    });
+
+    console.log(
+      "[Grandoria] Character SkillLoadout synchronized from skill-slot catalog:",
+      {
+        characterId,
+        skillLoadout: authenticatedSkillLoadout,
+      },
+    );
+  }
+
+  const rawQuestProgress =
+    characterData.QuestProgress ?? characterData.questProgress;
+  authenticatedQuestProgress = normalizeQuestProgress(rawQuestProgress);
+
+  const persistedQuestSchemaVersion =
+    readObject(rawQuestProgress).schemaVersion;
+
+  if (persistedQuestSchemaVersion !== authenticatedQuestProgress.schemaVersion) {
+    await characterSnapshot.ref.update({
+      QuestProgress: authenticatedQuestProgress,
+    });
+
+    console.log(
+      "[Grandoria] Character QuestProgress initialized or migrated:",
+      {
+        characterId,
+        schemaVersion: authenticatedQuestProgress.schemaVersion,
+      },
+    );
+  }
+
   const locationData =
     readObject(
       characterData.Location ??
@@ -1533,7 +1826,9 @@ if (
   !authenticatedInventory ||
   !authenticatedCurrencies ||
   !authenticatedResources ||
-  !authenticatedAttributes
+  !authenticatedAttributes ||
+  !authenticatedSkillLoadout ||
+  !authenticatedClassId
 ) {
   console.warn(
     "[Grandoria] Authentication rejected: persistent character data is missing.",
@@ -1548,6 +1843,7 @@ if (
     return {
       uid: authenticatedUid,
       characterId,
+      classId: authenticatedClassId,
       level: authenticatedLevel,
       experience: authenticatedExperience,
       unspentAttributePoints: authenticatedUnspentAttributePoints,
@@ -1558,6 +1854,8 @@ if (
       currencies: authenticatedCurrencies,
       resources: authenticatedResources,
       skillCooldowns: authenticatedSkillCooldowns,
+      skillLoadout: authenticatedSkillLoadout,
+      questProgress: authenticatedQuestProgress,
     };
   }
 
@@ -1569,9 +1867,19 @@ if (
 
   private readonly playerInputs = new Map<string, PlayerInput>();
 
+  private readonly lastChatMessageAt = new Map<string, number>();
+
   private readonly playerCollisionBlocks = new Set<string>();
 
   private readonly playerIdentities = new Map<string, PlayerIdentity>();
+
+  private readonly questService = new QuestService();
+
+  private readonly playerQuestProgress = new Map<string, QuestProgressData>();
+
+  private readonly playerQuestOperationChains = new Map<string, Promise<void>>();
+
+  private readonly playerQuestRegionsInside = new Map<string, Set<string>>();
 
   /*
    * Stores the remaining attack time
@@ -1615,6 +1923,8 @@ if (
 
   private readonly monstersPendingRespawnIdleTick = new Set<string>();
 
+  private readonly worldItemCollectionOperations = new Set<string>();
+
   private readonly completedDropRequests = new Map<
     string,
     Map<string, Record<string, unknown>>
@@ -1640,12 +1950,19 @@ if (
     Map<string, Record<string, unknown>>
   >();
 
+  private readonly completedSkillLoadoutRequests = new Map<
+    string,
+    Map<string, Record<string, unknown>>
+  >();
+
   private readonly playerSkillCooldowns = new Map<
     string,
     Map<string, number>
   >();
 
   private readonly playerSkillOperations = new Set<string>();
+
+  private readonly playerSkillLoadoutOperations = new Set<string>();
 
   private readonly skillNow = () => Date.now();
 
@@ -1708,6 +2025,41 @@ if (
         right: message.right,
         up: message.up,
         down: message.down,
+      });
+    },
+
+    chat_send: (client: Client, message?: ChatSendMessage) => {
+      const player = this.state.players.get(client.sessionId);
+
+      if (!player) {
+        return;
+      }
+
+      const now = Date.now();
+      const lastSentAt = this.lastChatMessageAt.get(client.sessionId) ?? 0;
+
+      if (now - lastSentAt < CHAT_MESSAGE_MIN_INTERVAL_MS) {
+        return;
+      }
+
+      const messageData = readObject(message);
+      const text = normalizeChatMessage(
+        messageData.text ?? messageData.Text,
+      );
+
+      if (!text) {
+        return;
+      }
+
+      this.lastChatMessageAt.set(client.sessionId, now);
+
+      this.broadcast("chat_message", {
+        sessionId: client.sessionId,
+        characterId: player.characterId,
+        displayName: player.displayName || "Player",
+        mapId: player.mapId,
+        text,
+        sentAt: now,
       });
     },
 
@@ -1809,6 +2161,13 @@ if (
       this.sendPlayerSkillCooldownState(client);
     },
 
+    set_skill_loadout_slot: async (
+      client: Client,
+      message?: SetSkillLoadoutSlotMessage,
+    ) => {
+      await this.handleSetSkillLoadoutSlotRequest(client, message);
+    },
+
     drop_item: async (client: Client, message?: DropItemMessage) => {
       await this.handleDropItemRequest(client, message);
     },
@@ -1822,6 +2181,26 @@ if (
       message?: SetInventoryOrderMessage,
     ) => {
       await this.handleSetInventoryOrderRequest(client, message);
+    },
+
+    quest_snapshot_request: (client: Client) => {
+      this.sendQuestSnapshot(client);
+    },
+
+    quest_interact: async (client: Client, message?: QuestInteractMessage) => {
+      await this.handleQuestInteractRequest(client, message);
+    },
+
+    quest_accept: async (client: Client, message?: QuestRequestMessage) => {
+      await this.handleQuestAcceptRequest(client, message);
+    },
+
+    quest_turn_in: async (client: Client, message?: QuestRequestMessage) => {
+      await this.handleQuestTurnInRequest(client, message);
+    },
+
+    quest_track: async (client: Client, message?: QuestRequestMessage) => {
+      await this.handleQuestTrackRequest(client, message);
     },
 
   };
@@ -1840,6 +2219,594 @@ if (
         this.fixedTick(FIXED_TIME_STEP);
       }
     });
+  }
+
+  private getPlayerQuestProgress(sessionId: string): QuestProgressData | undefined {
+    return this.playerQuestProgress.get(sessionId);
+  }
+
+  private getInventoryItemCount(player: PlayerState, itemId: string): number {
+    return Array.from(player.inventory)
+      .filter((slot) => slot.id === itemId)
+      .reduce((total, slot) => total + Math.max(0, Math.trunc(slot.quantity)), 0);
+  }
+
+  private async enqueueQuestOperation(
+    sessionId: string,
+    operation: () => Promise<void>,
+  ): Promise<void> {
+    const previous = this.playerQuestOperationChains.get(sessionId) ?? Promise.resolve();
+    const current = previous.catch((): void => undefined).then(operation);
+    this.playerQuestOperationChains.set(sessionId, current);
+
+    try {
+      await current;
+    } finally {
+      if (this.playerQuestOperationChains.get(sessionId) === current) {
+        this.playerQuestOperationChains.delete(sessionId);
+      }
+    }
+  }
+
+  private isPlayerNearQuestNpc(
+    player: PlayerState,
+    npcId: string,
+  ): boolean {
+    const npc = getWorldQuestNpc(npcId);
+
+    if (!npc || npc.mapId !== player.mapId) {
+      return false;
+    }
+
+    return Math.hypot(player.x - npc.x, player.y - npc.y) <= npc.interactionRadius;
+  }
+
+  private async persistPlayerQuestProgress(sessionId: string): Promise<void> {
+    const identity = this.playerIdentities.get(sessionId);
+    const progress = this.playerQuestProgress.get(sessionId);
+
+    if (!identity || !progress) {
+      throw new Error("PLAYER_QUEST_SESSION_MISSING");
+    }
+
+    await persistQuestProgress(identity, progress);
+  }
+
+  private sendQuestSnapshot(client: Client) {
+    const progress = this.playerQuestProgress.get(client.sessionId);
+
+    if (!progress) {
+      client.send("quest_snapshot", {
+        schemaVersion: 1,
+        quests: [],
+        trackedQuestId: "",
+        npcMarkers: [],
+        interactableNpcs: [],
+      });
+      return;
+    }
+
+    client.send("quest_snapshot", this.questService.buildSnapshot(progress));
+  }
+
+  private sendQuestNotification(
+    client: Client,
+    type: string,
+    text: string,
+    questId = "",
+    objectiveId = "",
+  ) {
+    client.send("quest_notification", {
+      type,
+      text,
+      questId,
+      objectiveId,
+    });
+  }
+
+  private getQuestDialogForNpc(progress: QuestProgressData, npcId: string) {
+    const snapshot = this.questService.buildSnapshot(progress);
+    const candidates = snapshot.quests.filter((quest) => {
+      if (quest.state === "ready" && quest.turnIn.type === "npc") {
+        return quest.turnIn.targetId === npcId;
+      }
+
+      if (quest.state === "available") {
+        return quest.offerNpcId === npcId;
+      }
+
+      if (quest.state === "active") {
+        return (
+          quest.offerNpcId === npcId ||
+          (quest.turnIn.type === "npc" && quest.turnIn.targetId === npcId) ||
+          quest.objectives.some(
+            (objective) => objective.type === "talk" && objective.targetId === npcId,
+          )
+        );
+      }
+
+      return false;
+    });
+
+    candidates.sort((left, right) => {
+      const priority = (state: string) => state === "ready" ? 0 : state === "available" ? 1 : 2;
+      return priority(left.state) - priority(right.state) || left.questId.localeCompare(right.questId);
+    });
+
+    const quest = candidates[0];
+
+    if (!quest) {
+      return null;
+    }
+
+    const dialogueText = quest.state === "ready"
+      ? quest.dialogue.ready
+      : quest.state === "available"
+        ? quest.dialogue.offer
+        : quest.dialogue.active;
+
+    const npc = getWorldQuestNpc(npcId);
+
+    return {
+      npcId,
+      npcName: npc?.displayName ?? npcId,
+      quest,
+      dialogueText,
+      canAccept: quest.state === "available" && quest.offerNpcId === npcId,
+      canTurnIn:
+        quest.state === "ready" &&
+        (quest.turnIn.type === "auto" || quest.turnIn.targetId === npcId),
+    };
+  }
+
+  private async handleQuestInteractRequest(
+    client: Client,
+    message?: QuestInteractMessage,
+  ) {
+    await this.enqueueQuestOperation(client.sessionId, async () => {
+      const messageData = message ?? {};
+      const requestId = readSafeStringFromAliases(
+        [messageData.requestId, messageData.RequestID],
+        128,
+      );
+      const npcId = readSafeStringFromAliases(
+        [messageData.npcId, messageData.npcID, messageData.NpcID],
+        128,
+      );
+      const player = this.state.players.get(client.sessionId);
+      const progress = this.playerQuestProgress.get(client.sessionId);
+
+      if (!requestId || !npcId || !player || !progress) {
+        client.send("quest_interact_result", { ok: false, code: "INVALID_REQUEST", requestId });
+        return;
+      }
+
+      if (!this.isPlayerNearQuestNpc(player, npcId)) {
+        client.send("quest_interact_result", { ok: false, code: "NPC_OUT_OF_RANGE", requestId, npcId });
+        return;
+      }
+
+      if (this.questService.isRequestProcessed(progress, requestId)) {
+        client.send("quest_interact_result", {
+          ok: true,
+          code: "DUPLICATE_REQUEST",
+          requestId,
+          npcId,
+          dialog: this.getQuestDialogForNpc(progress, npcId),
+        });
+        this.sendQuestSnapshot(client);
+        return;
+      }
+
+      const before = cloneQuestProgress(progress);
+      const change = this.questService.recordObjectiveEvent(
+        progress,
+        "talk",
+        npcId,
+        1,
+        `talk:${requestId}`,
+      );
+      markQuestRequestProcessed(progress, requestId, "interact", Date.now());
+
+      try {
+        await this.persistPlayerQuestProgress(client.sessionId);
+      } catch (error) {
+        replaceQuestProgress(progress, before);
+        client.send("quest_interact_result", { ok: false, code: "QUEST_SAVE_FAILED", requestId, npcId });
+        console.error("[Grandoria] Quest interaction persistence failed:", error);
+        return;
+      }
+
+      for (const questId of change.questIds) {
+        this.sendQuestNotification(client, "progress", "Progresso da missão atualizado.", questId);
+      }
+      for (const questId of change.becameReady) {
+        this.sendQuestNotification(client, "ready", "Missão pronta para entrega.", questId);
+      }
+
+      client.send("quest_interact_result", {
+        ok: true,
+        code: "QUEST_INTERACTION_OK",
+        requestId,
+        npcId,
+        dialog: this.getQuestDialogForNpc(progress, npcId),
+      });
+      this.sendQuestSnapshot(client);
+    });
+  }
+
+  private async handleQuestAcceptRequest(
+    client: Client,
+    message?: QuestRequestMessage,
+  ) {
+    await this.enqueueQuestOperation(client.sessionId, async () => {
+      const messageData = message ?? {};
+      const requestId = readSafeStringFromAliases([messageData.requestId, messageData.RequestID], 128);
+      const questId = readSafeStringFromAliases([messageData.questId, messageData.questID, messageData.QuestID], 128);
+      const npcId = readSafeStringFromAliases([messageData.npcId, messageData.npcID, messageData.NpcID], 128);
+      const player = this.state.players.get(client.sessionId);
+      const progress = this.playerQuestProgress.get(client.sessionId);
+      const definition = getQuestDefinition(questId);
+
+      if (!requestId || !questId || !player || !progress || !definition) {
+        client.send("quest_accept_result", { ok: false, code: "INVALID_REQUEST", requestId, questId });
+        return;
+      }
+
+      if (npcId !== definition.offerNpcId || !this.isPlayerNearQuestNpc(player, definition.offerNpcId)) {
+        client.send("quest_accept_result", { ok: false, code: "NPC_OUT_OF_RANGE", requestId, questId });
+        return;
+      }
+
+      const before = cloneQuestProgress(progress);
+      const result = this.questService.acceptQuest(
+        progress,
+        questId,
+        requestId,
+        (itemId) => this.getInventoryItemCount(player, itemId),
+      );
+
+      if (!result.ok || !result.changed) {
+        client.send("quest_accept_result", { ...result, requestId });
+        this.sendQuestSnapshot(client);
+        return;
+      }
+
+      try {
+        await this.persistPlayerQuestProgress(client.sessionId);
+      } catch (error) {
+        replaceQuestProgress(progress, before);
+        client.send("quest_accept_result", { ok: false, code: "QUEST_SAVE_FAILED", requestId, questId });
+        console.error("[Grandoria] Quest acceptance persistence failed:", error);
+        return;
+      }
+
+      this.sendQuestNotification(client, "accepted", "Missão aceita.", questId);
+      client.send("quest_accept_result", { ...result, requestId });
+      this.sendQuestSnapshot(client);
+    });
+  }
+
+  private async handleQuestTrackRequest(
+    client: Client,
+    message?: QuestRequestMessage,
+  ) {
+    await this.enqueueQuestOperation(client.sessionId, async () => {
+      const messageData = message ?? {};
+      const requestId = readSafeStringFromAliases([messageData.requestId, messageData.RequestID], 128);
+      const questId = readSafeStringFromAliases([messageData.questId, messageData.questID, messageData.QuestID], 128);
+      const progress = this.playerQuestProgress.get(client.sessionId);
+
+      if (!requestId || !questId || !progress) {
+        client.send("quest_track_result", { ok: false, code: "INVALID_REQUEST", requestId, questId });
+        return;
+      }
+
+      const before = cloneQuestProgress(progress);
+      const result = this.questService.setTrackedQuest(progress, questId, requestId);
+
+      if (!result.ok || !result.changed) {
+        client.send("quest_track_result", { ...result, requestId });
+        this.sendQuestSnapshot(client);
+        return;
+      }
+
+      try {
+        await this.persistPlayerQuestProgress(client.sessionId);
+      } catch (error) {
+        replaceQuestProgress(progress, before);
+        client.send("quest_track_result", { ok: false, code: "QUEST_SAVE_FAILED", requestId, questId });
+        console.error("[Grandoria] Quest tracking persistence failed:", error);
+        return;
+      }
+
+      client.send("quest_track_result", { ...result, requestId });
+      this.sendQuestSnapshot(client);
+    });
+  }
+
+  private async handleQuestTurnInRequest(
+    client: Client,
+    message?: QuestRequestMessage,
+  ) {
+    await this.enqueueQuestOperation(client.sessionId, async () => {
+      const messageData = message ?? {};
+      const requestId = readSafeStringFromAliases([messageData.requestId, messageData.RequestID], 128);
+      const questId = readSafeStringFromAliases([messageData.questId, messageData.questID, messageData.QuestID], 128);
+      const npcId = readSafeStringFromAliases([messageData.npcId, messageData.npcID, messageData.NpcID], 128);
+      const player = this.state.players.get(client.sessionId);
+      const progress = this.playerQuestProgress.get(client.sessionId);
+      const identity = this.playerIdentities.get(client.sessionId);
+      const definition = getQuestDefinition(questId);
+
+      if (!requestId || !questId || !player || !progress || !identity || !definition) {
+        client.send("quest_turn_in_result", { ok: false, code: "INVALID_REQUEST", requestId, questId });
+        return;
+      }
+
+      if (this.questService.isRequestProcessed(progress, requestId)) {
+        client.send("quest_turn_in_result", { ok: true, code: "DUPLICATE_REQUEST", requestId, questId });
+        this.sendQuestSnapshot(client);
+        return;
+      }
+
+      if (
+        definition.turnIn.type === "npc" &&
+        (npcId !== definition.turnIn.targetId || !this.isPlayerNearQuestNpc(player, definition.turnIn.targetId))
+      ) {
+        client.send("quest_turn_in_result", { ok: false, code: "NPC_OUT_OF_RANGE", requestId, questId });
+        return;
+      }
+
+      const questBefore = cloneQuestProgress(progress);
+      const inventoryBefore = this.readPlayerInventory(player);
+      const stateBefore = {
+        gold: player.gold,
+        gem: player.gem,
+        level: player.level,
+        experience: player.experience,
+        experienceToNextLevel: player.experienceToNextLevel,
+        unspentAttributePoints: player.unspentAttributePoints,
+        currentHealth: player.currentHealth,
+        maxHealth: player.maxHealth,
+        isAlive: player.isAlive,
+      };
+
+      const validation = this.questService.validateTurnIn(
+        progress,
+        questId,
+        requestId,
+        (itemId) => this.getInventoryItemCount(player, itemId),
+      );
+
+      if (!validation.ok) {
+        replaceQuestProgress(progress, questBefore);
+        client.send("quest_turn_in_result", { ...validation, requestId });
+        this.sendQuestSnapshot(client);
+        return;
+      }
+
+      for (const objective of definition.objectives) {
+        if (objective.type === "deliver" && !this.removeInventoryItem(player, objective.targetId, objective.quantity)) {
+          this.restorePlayerInventory(player, inventoryBefore);
+          replaceQuestProgress(progress, questBefore);
+          client.send("quest_turn_in_result", { ok: false, code: "QUEST_ITEMS_MISSING", requestId, questId });
+          return;
+        }
+      }
+
+      for (const reward of definition.rewards.items) {
+        if (!this.addInventoryItem(player, reward.itemId, reward.quantity)) {
+          this.restorePlayerInventory(player, inventoryBefore);
+          replaceQuestProgress(progress, questBefore);
+          client.send("quest_turn_in_result", { ok: false, code: "INVENTORY_FULL", requestId, questId });
+          return;
+        }
+      }
+
+      player.gold += definition.rewards.gold;
+      player.gem += definition.rewards.gem;
+      const progression = this.applyExperienceToPlayer(player, definition.rewards.xp);
+
+      if (progression.levelsGained > 0) {
+        this.recalculatePlayerMaxHealth(player);
+      }
+
+      const completed = this.questService.completeTurnIn(progress, questId, requestId);
+
+      if (!completed.ok) {
+        this.restorePlayerInventory(player, inventoryBefore);
+        replaceQuestProgress(progress, questBefore);
+        Object.assign(player, stateBefore);
+        client.send("quest_turn_in_result", { ...completed, requestId });
+        return;
+      }
+
+      try {
+        await firebaseAdminFirestore
+          .collection("users")
+          .doc(identity.playerUid)
+          .collection("characters")
+          .doc(identity.characterId)
+          .update({
+            Inventory: this.readPlayerInventory(player),
+            Currencies: { Gold: player.gold, Gem: player.gem },
+            Experience: player.experience,
+            Level: player.level,
+            UnspentAttributePoints: player.unspentAttributePoints,
+            "Resources.CurrentHP": Math.max(0, Math.min(player.currentHealth, player.maxHealth)),
+            "Resources.MaxHP": player.maxHealth,
+            QuestProgress: progress,
+          });
+      } catch (error) {
+        this.restorePlayerInventory(player, inventoryBefore);
+        replaceQuestProgress(progress, questBefore);
+        player.gold = stateBefore.gold;
+        player.gem = stateBefore.gem;
+        player.level = stateBefore.level;
+        player.experience = stateBefore.experience;
+        player.experienceToNextLevel = stateBefore.experienceToNextLevel;
+        player.unspentAttributePoints = stateBefore.unspentAttributePoints;
+        player.currentHealth = stateBefore.currentHealth;
+        player.maxHealth = stateBefore.maxHealth;
+        player.isAlive = stateBefore.isAlive;
+        client.send("quest_turn_in_result", { ok: false, code: "QUEST_SAVE_FAILED", requestId, questId });
+        console.error("[Grandoria] Quest turn-in persistence failed; state rolled back:", error);
+        return;
+      }
+
+      this.sendQuestNotification(
+        client,
+        "completed",
+        definition.dialogue.completed || "Missão concluída.",
+        questId,
+      );
+      if (definition.rewards.xp || definition.rewards.gold || definition.rewards.gem || definition.rewards.items.length) {
+        this.sendQuestNotification(client, "reward", "Recompensa recebida.", questId);
+      }
+      client.send("quest_turn_in_result", {
+        ok: true,
+        code: "QUEST_COMPLETED",
+        requestId,
+        questId,
+        rewards: definition.rewards,
+        inventory: this.readPlayerInventory(player),
+        gold: player.gold,
+        gem: player.gem,
+        level: player.level,
+        experience: player.experience,
+        experienceToNextLevel: player.experienceToNextLevel,
+        unspentAttributePoints: player.unspentAttributePoints,
+        currentHealth: player.currentHealth,
+        maxHealth: player.maxHealth,
+      });
+      this.sendQuestSnapshot(client);
+    });
+  }
+
+  private async recordQuestObjectiveEvent(
+    sessionId: string,
+    type: "talk" | "kill" | "collect" | "explore",
+    targetId: string,
+    amount: number,
+    eventId: string,
+  ) {
+    await this.enqueueQuestOperation(sessionId, async () => {
+      const progress = this.playerQuestProgress.get(sessionId);
+      const client = this.clients.find((candidate) => candidate.sessionId === sessionId);
+
+      if (!progress || !client) {
+        return;
+      }
+
+      const before = cloneQuestProgress(progress);
+      const change = this.questService.recordObjectiveEvent(progress, type, targetId, amount, eventId);
+
+      if (!change.changed) {
+        return;
+      }
+
+      try {
+        await this.persistPlayerQuestProgress(sessionId);
+      } catch (error) {
+        replaceQuestProgress(progress, before);
+        console.error("[Grandoria] Quest objective persistence failed:", { sessionId, type, targetId, eventId, error });
+        this.sendQuestNotification(client, "error", "Não foi possível salvar o progresso da missão.");
+        return;
+      }
+
+      for (const questId of change.questIds) {
+        this.sendQuestNotification(client, "progress", "Progresso da missão atualizado.", questId);
+      }
+      for (const questId of change.becameReady) {
+        this.sendQuestNotification(client, "ready", "Missão pronta para entrega.", questId);
+      }
+      this.sendQuestSnapshot(client);
+    });
+  }
+
+  private async synchronizeQuestDeliverProgress(sessionId: string) {
+    await this.enqueueQuestOperation(sessionId, async () => {
+      const progress = this.playerQuestProgress.get(sessionId);
+      const player = this.state.players.get(sessionId);
+      const client = this.clients.find((candidate) => candidate.sessionId === sessionId);
+
+      if (!progress || !player) {
+        return;
+      }
+
+      const before = cloneQuestProgress(progress);
+      const change = this.questService.synchronizeDeliverObjectives(
+        progress,
+        (itemId) => this.getInventoryItemCount(player, itemId),
+      );
+
+      if (!change.changed) {
+        return;
+      }
+
+      try {
+        await this.persistPlayerQuestProgress(sessionId);
+      } catch (error) {
+        replaceQuestProgress(progress, before);
+        console.error("[Grandoria] Deliver objective synchronization failed:", error);
+        return;
+      }
+
+      if (client) {
+        for (const questId of change.becameReady) {
+          this.sendQuestNotification(client, "ready", "Missão pronta para entrega.", questId);
+        }
+        this.sendQuestSnapshot(client);
+      }
+    });
+  }
+
+  private updateQuestExploration() {
+    for (const [sessionId, player] of this.state.players.entries()) {
+      const progress = this.playerQuestProgress.get(sessionId);
+
+      if (!progress || !player.isAlive) {
+        continue;
+      }
+
+      const relevantRegionIds = new Set<string>();
+
+      for (const definition of getQuestDefinitions()) {
+        const record = progress.quests[definition.questId];
+        if (!record || (record.state !== "active" && record.state !== "ready")) {
+          continue;
+        }
+        for (const objective of definition.objectives) {
+          if (objective.type === "explore") {
+            relevantRegionIds.add(objective.targetId);
+          }
+        }
+      }
+
+      const previousInside = this.playerQuestRegionsInside.get(sessionId) ?? new Set<string>();
+      const nextInside = new Set<string>();
+
+      for (const regionId of relevantRegionIds) {
+        const region = getWorldQuestRegion(regionId);
+        if (!region || !isPointInsideWorldQuestRegion(region, player.mapId, player.x, player.y)) {
+          continue;
+        }
+
+        nextInside.add(regionId);
+        if (!previousInside.has(regionId)) {
+          void this.recordQuestObjectiveEvent(
+            sessionId,
+            "explore",
+            regionId,
+            1,
+            `explore:${regionId}:${sessionId}:${Date.now()}`,
+          );
+        }
+      }
+
+      this.playerQuestRegionsInside.set(sessionId, nextInside);
+    }
   }
 
   private createWorldItem(options: CreateWorldItemOptions): string | null {
@@ -1938,6 +2905,47 @@ if (
       sub_type: slot.sub_type,
       quantity: slot.quantity,
     }));
+  }
+
+  private readPlayerSkillLoadout(
+    player: PlayerState,
+  ): SkillLoadoutData {
+    const snapshot = Object.fromEntries(
+      Array.from(player.skillLoadout.entries()),
+    );
+
+    return normalizeSkillLoadout(snapshot).loadout;
+  }
+
+  private restorePlayerSkillLoadout(
+    player: PlayerState,
+    loadout: SkillLoadoutData,
+  ) {
+    player.skillLoadout.clear();
+
+    for (const [slotId, skillID] of Object.entries(loadout)) {
+      player.skillLoadout.set(slotId, skillID);
+    }
+  }
+
+  private async persistPlayerSkillLoadout(
+    client: Client,
+    player: PlayerState,
+  ) {
+    const identity = this.playerIdentities.get(client.sessionId);
+
+    if (!identity) {
+      throw new Error("PLAYER_IDENTITY_MISSING");
+    }
+
+    await firebaseAdminFirestore
+      .collection("users")
+      .doc(identity.playerUid)
+      .collection("characters")
+      .doc(identity.characterId)
+      .update({
+        SkillLoadout: this.readPlayerSkillLoadout(player),
+      });
   }
 
   private restorePlayerInventory(
@@ -2469,6 +3477,242 @@ if (
     });
   }
 
+  private async handleSetSkillLoadoutSlotRequest(
+    client: Client,
+    message?: SetSkillLoadoutSlotMessage,
+  ) {
+    const messageData = readObject(message);
+    const requestId = readSafeStringFromAliases(
+      [messageData.requestId, messageData.RequestID],
+      MAX_ITEM_REQUEST_ID_LENGTH,
+    );
+    const slotId = readSafeStringFromAliases(
+      [
+        messageData.slotId,
+        messageData.slotID,
+        messageData.SlotId,
+        messageData.SlotID,
+      ],
+      64,
+    );
+    const rawSkillID = readFirstDefined(messageData, [
+      "skillID",
+      "skillId",
+      "SkillID",
+    ]);
+    const skillID = readSafeString(rawSkillID, 128);
+    const player = this.state.players.get(client.sessionId);
+
+    if (
+      !requestId ||
+      !slotId ||
+      !skillID ||
+      !/^[A-Za-z0-9_-]+$/.test(skillID) ||
+      !player
+    ) {
+      client.send("set_skill_loadout_slot_result", {
+        code: "INVALID_REQUEST",
+        loadout: player
+          ? this.readPlayerSkillLoadout(player)
+          : undefined,
+        ok: false,
+        requestId,
+        skillID,
+        slotId,
+      });
+      return;
+    }
+
+    const previousResult = this.completedSkillLoadoutRequests
+      .get(client.sessionId)
+      ?.get(requestId);
+
+    if (previousResult) {
+      client.send("set_skill_loadout_slot_result", {
+        ...previousResult,
+        loadout: this.readPlayerSkillLoadout(player),
+      });
+      return;
+    }
+
+    if (this.playerSkillLoadoutOperations.has(client.sessionId)) {
+      client.send("set_skill_loadout_slot_result", {
+        code: "SKILL_LOADOUT_BUSY",
+        loadout: this.readPlayerSkillLoadout(player),
+        ok: false,
+        requestId,
+        skillID,
+        slotId,
+      });
+      return;
+    }
+
+    const currentLoadout = this.readPlayerSkillLoadout(player);
+    const skillDefinition =
+      skillID === "empty"
+        ? undefined
+        : getSkillDefinition(skillID);
+    const plan = planSkillLoadoutAssignment(
+      currentLoadout,
+      slotId,
+      skillID,
+      skillDefinition
+        ? {
+            enabled: skillDefinition.enabled,
+            loadoutEligible: skillDefinition.loadoutEligible,
+          }
+        : undefined,
+    );
+
+    if (!plan.ok) {
+      client.send("set_skill_loadout_slot_result", {
+        code: plan.code,
+        loadout: currentLoadout,
+        ok: false,
+        requestId,
+        skillID: plan.skillID,
+        slotId: plan.slotId,
+      });
+      return;
+    }
+
+    /*
+     * A structurally valid loadout assignment is still subject to the
+     * authoritative Class -> Skills rule. Universal skills bypass the
+     * per-class list, while non-universal skills must be explicitly listed
+     * by the character class catalog. Removal ("empty") never needs class
+     * authorization.
+     */
+    if (plan.skillID !== "empty" && skillDefinition) {
+      const classSkillAccess = resolveClassSkillAccess(
+        player.classId,
+        skillDefinition,
+      );
+
+      if (!classSkillAccess.allowed) {
+        client.send("set_skill_loadout_slot_result", {
+          classId: player.classId,
+          classSkillAccessCode: classSkillAccess.code,
+          code:
+            classSkillAccess.code === "UNKNOWN_CLASS"
+              ? "UNKNOWN_CLASS"
+              : "SKILL_NOT_AVAILABLE_TO_CLASS",
+          loadout: currentLoadout,
+          ok: false,
+          requestId,
+          skillID: plan.skillID,
+          slotId: plan.slotId,
+        });
+        return;
+      }
+    }
+
+    if (!plan.changed) {
+      const result: Record<string, unknown> = {
+        code: plan.code,
+        loadout: currentLoadout,
+        ok: true,
+        requestId,
+        skillID: plan.skillID,
+        slotId: plan.slotId,
+      };
+
+      let sessionRequests =
+        this.completedSkillLoadoutRequests.get(client.sessionId);
+
+      if (!sessionRequests) {
+        sessionRequests = new Map();
+        this.completedSkillLoadoutRequests.set(
+          client.sessionId,
+          sessionRequests,
+        );
+      }
+
+      sessionRequests.set(requestId, result);
+
+      while (sessionRequests.size > 64) {
+        const oldestRequestId = sessionRequests.keys().next().value;
+
+        if (typeof oldestRequestId !== "string") {
+          break;
+        }
+
+        sessionRequests.delete(oldestRequestId);
+      }
+
+      client.send("set_skill_loadout_slot_result", result);
+      return;
+    }
+
+    this.playerSkillLoadoutOperations.add(client.sessionId);
+    this.restorePlayerSkillLoadout(player, plan.loadout);
+
+    try {
+      await this.persistPlayerSkillLoadout(client, player);
+    } catch (error) {
+      this.restorePlayerSkillLoadout(player, currentLoadout);
+
+      client.send("set_skill_loadout_slot_result", {
+        code: "SKILL_LOADOUT_SAVE_FAILED",
+        loadout: this.readPlayerSkillLoadout(player),
+        ok: false,
+        requestId,
+        skillID: plan.skillID,
+        slotId: plan.slotId,
+      });
+
+      console.error(
+        "[Grandoria] SkillLoadout save failed:",
+        error,
+      );
+      return;
+    } finally {
+      this.playerSkillLoadoutOperations.delete(client.sessionId);
+    }
+
+    const result: Record<string, unknown> = {
+      code: plan.code,
+      loadout: this.readPlayerSkillLoadout(player),
+      ok: true,
+      requestId,
+      skillID: plan.skillID,
+      slotId: plan.slotId,
+    };
+
+    let sessionRequests =
+      this.completedSkillLoadoutRequests.get(client.sessionId);
+
+    if (!sessionRequests) {
+      sessionRequests = new Map();
+      this.completedSkillLoadoutRequests.set(
+        client.sessionId,
+        sessionRequests,
+      );
+    }
+
+    sessionRequests.set(requestId, result);
+
+    while (sessionRequests.size > 64) {
+      const oldestRequestId = sessionRequests.keys().next().value;
+
+      if (typeof oldestRequestId !== "string") {
+        break;
+      }
+
+      sessionRequests.delete(oldestRequestId);
+    }
+
+    client.send("set_skill_loadout_slot_result", result);
+
+    console.log("[Grandoria] SkillLoadout slot updated and persisted:", {
+      loadout: this.readPlayerSkillLoadout(player),
+      requestId,
+      sessionId: client.sessionId,
+      skillID: plan.skillID,
+      slotId: plan.slotId,
+    });
+  }
+
   private getPlayerSkillCooldownRemainingMs(
     sessionId: string,
     skillID: string,
@@ -2959,6 +4203,7 @@ if (
     }
 
     client.send("buy_item_result", result);
+    void this.synchronizeQuestDeliverProgress(client.sessionId);
 
     console.log("[Grandoria] Item purchased and persisted:", {
       currency,
@@ -3149,6 +4394,7 @@ if (
     }
 
     client.send("sell_item_result", result);
+    void this.synchronizeQuestDeliverProgress(client.sessionId);
 
     console.log("[Grandoria] Item sold and persisted:", {
       itemID,
@@ -3328,6 +4574,7 @@ if (
       requestId,
       slot: slotName,
     });
+    void this.synchronizeQuestDeliverProgress(client.sessionId);
 
     console.log(`[Grandoria] Equipment updated and persisted: ${client.sessionId}`, {
       slot: slotName,
@@ -3732,6 +4979,7 @@ if (
     }
 
     client.send("drop_item_result", result);
+    void this.synchronizeQuestDeliverProgress(client.sessionId);
 
     console.log("[Grandoria] Inventory drop created:", {
       itemID,
@@ -3785,7 +5033,10 @@ if (
 
     const item = this.state.items.get(sharedItemID);
 
-    if (!item) {
+    if (
+      !item ||
+      this.worldItemCollectionOperations.has(sharedItemID)
+    ) {
       client.send("collect_item_result", {
         code: "ITEM_NOT_FOUND",
         ok: false,
@@ -3829,12 +5080,14 @@ if (
       return;
     }
 
+    this.worldItemCollectionOperations.add(sharedItemID);
     this.playerInventoryOperations.add(client.sessionId);
     const inventoryBefore = this.readPlayerInventory(player);
 
     if (!this.addInventoryItem(player, item.itemID, item.quantity)) {
       this.restorePlayerInventory(player, inventoryBefore);
       this.playerInventoryOperations.delete(client.sessionId);
+      this.worldItemCollectionOperations.delete(sharedItemID);
 
       client.send("collect_item_result", {
         code: "INVENTORY_FULL",
@@ -3850,6 +5103,7 @@ if (
     } catch (error) {
       this.restorePlayerInventory(player, inventoryBefore);
       this.playerInventoryOperations.delete(client.sessionId);
+      this.worldItemCollectionOperations.delete(sharedItemID);
 
       client.send("collect_item_result", {
         code: "INVENTORY_SAVE_FAILED",
@@ -3876,8 +5130,17 @@ if (
     };
 
     this.state.items.delete(sharedItemID);
+    this.worldItemCollectionOperations.delete(sharedItemID);
 
     client.send("collect_item_result", result);
+    void this.recordQuestObjectiveEvent(
+      client.sessionId,
+      "collect",
+      item.itemID,
+      item.quantity,
+      `collect:${sharedItemID}`,
+    );
+    void this.synchronizeQuestDeliverProgress(client.sessionId);
 
     console.log("[Grandoria] Shared item collected:", {
       itemID: item.itemID,
@@ -4038,6 +5301,23 @@ if (
       const candidateY = Math.round(
         originY + Math.sin(angle) * radius,
       );
+
+      // Rounding to integer world coordinates can move a candidate slightly
+      // inside or outside the configured ring, especially when the monster
+      // itself is on fractional coordinates. Validate the final coordinates
+      // against the real authoritative death position.
+      const candidateDistance = Math.hypot(
+        candidateX - monster.x,
+        candidateY - monster.y,
+      );
+
+      if (
+        candidateDistance < MONSTER_DROP_MIN_RADIUS ||
+        candidateDistance > MONSTER_DROP_MAX_RADIUS
+      ) {
+        continue;
+      }
+
       const resolved = resolvePlayerSpawn(
         monster.mapId,
         candidateX,
@@ -4628,6 +5908,8 @@ if (
         player.direction = "down";
       }
     });
+
+    this.updateQuestExploration();
   }
 
   private updatePlayerHealthRegeneration(deltaTime: number) {
@@ -5831,6 +7113,14 @@ if (
         monsterDefinition.xpReward,
       );
 
+      void this.recordQuestObjectiveEvent(
+        sessionId,
+        "kill",
+        monster.monsterType,
+        1,
+        `kill:${monsterId}:${Date.now()}`,
+      );
+
       this.monsterHurtRemaining.delete(monsterId);
 
       this.monsterPatrolStates.delete(monsterId);
@@ -5953,6 +7243,8 @@ if (
     );
 
     player.characterId = identity.characterId;
+
+    player.classId = authenticatedPlayer.classId;
 
     player.level = authenticatedPlayer.level;
 
@@ -6090,9 +7382,28 @@ if (
       player.inventory.push(inventorySlot);
     }
 
+    for (const [slotId, skillID] of Object.entries(
+      authenticatedPlayer.skillLoadout ?? {},
+    )) {
+      player.skillLoadout.set(slotId, skillID);
+    }
+
     this.playerIdentities.set(client.sessionId, identity);
 
     this.state.players.set(client.sessionId, player);
+
+    const questProgress = normalizeQuestProgress(authenticatedPlayer.questProgress);
+    this.playerQuestProgress.set(client.sessionId, questProgress);
+    this.playerQuestRegionsInside.set(client.sessionId, new Set());
+    const deliverSync = this.questService.synchronizeDeliverObjectives(
+      questProgress,
+      (itemId) => this.getInventoryItemCount(player, itemId),
+    );
+    if (deliverSync.changed) {
+      void persistQuestProgress(identity, questProgress).catch((error) => {
+        console.error("[Grandoria] Quest progress reconciliation on join failed:", error);
+      });
+    }
 
     const now = this.skillNow();
     const activeSkillCooldowns = new Map<string, number>();
@@ -6129,6 +7440,7 @@ if (
     console.log(
       `[Grandoria] Player ${client.sessionId} joined.`,
       `Character: ${player.displayName || "not provided"}.`,
+      `Class: ${player.classId || "not provided"}.`,
       `Map: ${player.mapId || "not provided"}.`,
       `Level: ${player.level}.`,
       `XP: ${player.experience}/${player.experienceToNextLevel}.`,
@@ -6184,9 +7496,13 @@ if (
           sub_type: player.equipment.OffHand.sub_type,
         },
       },
+      "Skill loadout:",
+      this.readPlayerSkillLoadout(player),
       `Position: (${player.x}, ${player.y}).`,
       `Total: ${this.state.players.size}`,
     );
+
+    this.sendQuestSnapshot(client);
   }
 
   async onLeave(
@@ -6199,7 +7515,11 @@ if (
   const identity =
     this.playerIdentities.get(client.sessionId);
 
+  const questProgress =
+    this.playerQuestProgress.get(client.sessionId);
+
   this.playerInputs.delete(client.sessionId);
+  this.lastChatMessageAt.delete(client.sessionId);
   this.playerCollisionBlocks.delete(client.sessionId);
   this.playerIdentities.delete(client.sessionId);
   this.playerAttackRemaining.delete(client.sessionId);
@@ -6214,10 +7534,15 @@ if (
   this.completedSaleRequests.delete(client.sessionId);
   this.completedAttributeAllocationRequests.delete(client.sessionId);
   this.completedSkillUseRequests.delete(client.sessionId);
+  this.completedSkillLoadoutRequests.delete(client.sessionId);
   this.playerSkillCooldowns.delete(client.sessionId);
   this.playerSkillOperations.delete(client.sessionId);
+  this.playerSkillLoadoutOperations.delete(client.sessionId);
   this.playerInventoryOperations.delete(client.sessionId);
   this.playerAttributeOperations.delete(client.sessionId);
+  this.playerQuestProgress.delete(client.sessionId);
+  this.playerQuestOperationChains.delete(client.sessionId);
+  this.playerQuestRegionsInside.delete(client.sessionId);
 
   this.state.players.delete(client.sessionId);
 
@@ -6240,6 +7565,9 @@ if (
         .collection("characters")
         .doc(identity.characterId)
         .update({
+          ClassId:
+            player.classId,
+
           "Location.Map":
             normalizeWorldMapId(player.mapId),
 
@@ -6259,6 +7587,11 @@ if (
 
           "Resources.MaxHP":
             player.maxHealth,
+
+          SkillLoadout:
+            this.readPlayerSkillLoadout(player),
+
+          ...(questProgress ? { QuestProgress: questProgress } : {}),
         });
 
       console.log(
@@ -6266,6 +7599,9 @@ if (
         {
           characterId:
             identity.characterId,
+
+          classId:
+            player.classId,
 
           mapId:
             normalizeWorldMapId(player.mapId),
@@ -6284,6 +7620,9 @@ if (
 
           maxHealth:
             player.maxHealth,
+
+          skillLoadout:
+            this.readPlayerSkillLoadout(player),
         },
       );
     } catch (error) {
@@ -6315,6 +7654,9 @@ if (
 
   onDispose() {
     this.playerInputs.clear();
+    this.playerQuestProgress.clear();
+    this.playerQuestOperationChains.clear();
+    this.playerQuestRegionsInside.clear();
 
     this.playerCollisionBlocks.clear();
     this.playerIdentities.clear();
@@ -6333,10 +7675,17 @@ if (
     this.monsterAttackStates.clear();
     this.monsterAttackCooldownRemaining.clear();
     this.monstersPendingRespawnIdleTick.clear();
+    this.worldItemCollectionOperations.clear();
+    this.completedDropRequests.clear();
+    this.completedPurchaseRequests.clear();
+    this.completedSaleRequests.clear();
+    this.playerInventoryOperations.clear();
     this.completedAttributeAllocationRequests.clear();
     this.completedSkillUseRequests.clear();
+    this.completedSkillLoadoutRequests.clear();
     this.playerSkillCooldowns.clear();
     this.playerSkillOperations.clear();
+    this.playerSkillLoadoutOperations.clear();
     this.playerAttributeOperations.clear();
     this.monsterSpawnsById.clear();
     this.monsterRegionsByMonsterId.clear();

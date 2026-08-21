@@ -5,8 +5,8 @@ import { PlayerState } from "../src/rooms/schema/MyRoomState.js";
 
 const MAP_ID = "MAP_1";
 const FIXED_TIME_STEP_MS = 1000 / 60;
-const HARE_ID = "map1_hare_001";
-const BOAR_ID = "map1_boar_001";
+const HARE_ID = "grassland_hare_01__001";
+const BOAR_ID = "grassland_boar_01__001";
 
 type TestableMyRoom = MyRoom & {
   fixedTick(deltaTime: number): void;
@@ -63,6 +63,12 @@ describe("MyRoom authoritative monster reactions", () => {
 
     const testRoom = room as unknown as TestableMyRoom;
 
+    for (const monsterId of testRoom.state.monsters.keys()) {
+      if (monsterId !== HARE_ID && monsterId !== BOAR_ID) {
+        testRoom.state.monsters.delete(monsterId);
+      }
+    }
+
     testRoom.monsterRandom = () => 1;
     rooms.push(testRoom);
 
@@ -71,74 +77,86 @@ describe("MyRoom authoritative monster reactions", () => {
 
   it("detects a player at 128 pixels but not at 129 pixels", async () => {
     const room = await createRoom();
-    const player = addPlayer(room, "player", 297, 968);
     const hare = room.state.monsters.get(HARE_ID);
 
     assert.ok(hare);
 
-    advanceFixedTicks(room, 1);
-    assertClose(hare.x, 168);
+    const spawnX = hare.x;
+    const spawnY = hare.y;
+    const player = addPlayer(room, "player", spawnX + 129, spawnY);
 
-    player.x = 296;
+    advanceFixedTicks(room, 1);
+    assertClose(hare.x, spawnX);
+
+    player.x = spawnX + 128;
 
     advanceFixedTicks(room, 1);
-    assert.ok(hare.x < 168);
+    assert.ok(hare.x < spawnX);
   });
 
   it("makes the hare flee at 45 pixels per second", async () => {
     const room = await createRoom();
-
-    addPlayer(room, "player", 200, 968);
-
-    advanceFixedTicks(room, 60);
-
     const hare = room.state.monsters.get(HARE_ID);
 
     assert.ok(hare);
-    assertClose(hare.x, 123);
-    assertClose(hare.y, 968);
+
+    const spawnX = hare.x;
+    const spawnY = hare.y;
+
+    addPlayer(room, "player", spawnX + 32, spawnY);
+
+    advanceFixedTicks(room, 60);
+
+    assertClose(hare.x, spawnX - 45);
+    assertClose(hare.y, spawnY);
     assert.strictEqual(hare.direction, "left");
     assert.strictEqual(hare.animation, "run");
   });
 
   it("reacts to the closest player on the same map", async () => {
     const room = await createRoom();
-
-    addPlayer(room, "far-player", 100, 968);
-    addPlayer(room, "near-player", 180, 968);
-
     const hare = room.state.monsters.get(HARE_ID);
 
     assert.ok(hare);
 
+    const spawnX = hare.x;
+    const spawnY = hare.y;
+
+    addPlayer(room, "far-player", spawnX - 68, spawnY);
+    addPlayer(room, "near-player", spawnX + 12, spawnY);
+
     advanceFixedTicks(room, 1);
 
-    assert.ok(hare.x < 168);
+    assert.ok(hare.x < spawnX);
     assert.strictEqual(hare.direction, "left");
   });
 
   it("makes the boar chase at 50 pixels per second", async () => {
     const room = await createRoom();
-
-    addPlayer(room, "player", 250, 1056);
-
-    advanceFixedTicks(room, 30);
-
     const boar = room.state.monsters.get(BOAR_ID);
 
     assert.ok(boar);
-    assertClose(boar.x, 169);
-    assertClose(boar.y, 1056);
+
+    const spawnX = boar.x;
+    const spawnY = boar.y;
+
+    addPlayer(room, "player", spawnX + 106, spawnY);
+
+    advanceFixedTicks(room, 30);
+
+    assertClose(boar.x, spawnX + 25);
+    assertClose(boar.y, spawnY);
     assert.strictEqual(boar.direction, "right");
     assert.strictEqual(boar.animation, "run");
   });
 
   it("keeps the acquired target until it passes 192 pixels", async () => {
     const room = await createRoom();
-    const player = addPlayer(room, "player", 250, 1056);
     const boar = room.state.monsters.get(BOAR_ID);
 
     assert.ok(boar);
+
+    const player = addPlayer(room, "player", boar.x + 106, boar.y);
 
     advanceFixedTicks(room, 1);
 
@@ -159,55 +177,62 @@ describe("MyRoom authoritative monster reactions", () => {
 
   it("returns to the spawn after losing the target", async () => {
     const room = await createRoom();
-    const player = addPlayer(room, "player", 250, 1056);
     const boar = room.state.monsters.get(BOAR_ID);
 
     assert.ok(boar);
 
-    advanceFixedTicks(room, 30);
-    assertClose(boar.x, 169);
+    const spawnX = boar.x;
+    const spawnY = boar.y;
+    const player = addPlayer(room, "player", spawnX + 106, spawnY);
 
-    player.x = 400;
+    advanceFixedTicks(room, 30);
+    assertClose(boar.x, spawnX + 25);
+
+    player.x = spawnX + 256;
 
     advanceFixedTicks(room, 120);
 
-    assertClose(boar.x, 144);
-    assertClose(boar.y, 1056);
+    assertClose(boar.x, spawnX);
+    assertClose(boar.y, spawnY);
     assert.strictEqual(boar.direction, "down");
     assert.strictEqual(boar.animation, "idle");
   });
 
   it("does not let a reaction leave the 192 pixel home leash", async () => {
     const room = await createRoom();
-    const player = addPlayer(room, "player", 200, 1056);
     const boar = room.state.monsters.get(BOAR_ID);
 
     assert.ok(boar);
 
+    const spawnX = boar.x;
+    const spawnY = boar.y;
+    const player = addPlayer(room, "player", spawnX + 56, spawnY);
+
     advanceFixedTicks(room, 1);
 
-    boar.x = 335.9;
-    boar.y = 1056;
-    player.x = 385.9;
-    player.y = 1056;
+    boar.x = spawnX + 191.9;
+    boar.y = spawnY;
+    player.x = boar.x + 50;
+    player.y = spawnY;
 
     const beforeLeash = boar.x;
 
     advanceFixedTicks(room, 1);
 
     assert.ok(boar.x < beforeLeash);
-    assert.ok(Math.hypot(boar.x - 144, boar.y - 1056) < 192);
+    assert.ok(Math.hypot(boar.x - spawnX, boar.y - spawnY) < 192);
   });
 
   it("stops the boar near the player while respecting attack cadence", async () => {
     const room = await createRoom();
-    const player = addPlayer(room, "player", 200, 1056);
-
-    advanceFixedTicks(room, 300);
-
     const boar = room.state.monsters.get(BOAR_ID);
 
     assert.ok(boar);
+
+    const player = addPlayer(room, "player", boar.x + 56, boar.y);
+
+    advanceFixedTicks(room, 300);
+
     assertClose(Math.hypot(player.x - boar.x, player.y - boar.y), 16);
     assert.ok(player.currentHealth < player.maxHealth);
     assert.strictEqual(boar.animation, "idle");
@@ -215,17 +240,20 @@ describe("MyRoom authoritative monster reactions", () => {
 
   it("ignores players on another map", async () => {
     const room = await createRoom();
-    const player = addPlayer(room, "player", 200, 968);
     const hare = room.state.monsters.get(HARE_ID);
 
     assert.ok(hare);
+
+    const spawnX = hare.x;
+    const spawnY = hare.y;
+    const player = addPlayer(room, "player", spawnX + 32, spawnY);
 
     player.mapId = "MAP_2";
 
     advanceFixedTicks(room, 60);
 
-    assertClose(hare.x, 168);
-    assertClose(hare.y, 968);
+    assertClose(hare.x, spawnX);
+    assertClose(hare.y, spawnY);
     assert.strictEqual(hare.animation, "idle");
   });
 });

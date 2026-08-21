@@ -61,6 +61,8 @@ function findInlineBlocks(root: unknown): string[] {
   visitObjects(root, (entry) => {
     if (Array.isArray(entry.inlineCode)) {
       blocks.push(entry.inlineCode.join("\n"));
+    } else if (typeof entry.inlineCode === "string") {
+      blocks.push(entry.inlineCode);
     }
   });
 
@@ -154,36 +156,45 @@ describe("GDevelop realtime migration closure", () => {
       false,
     );
     assert.ok(
-      findGroup(colyseusEvents, "03 — COLYSEUS — REMOTE MONSTERS"),
+      findGroup(colyseusEvents, "03 — COLYSEUS — SERVER MONSTERS"),
     );
   });
 
-  it("prevents player controls from moving the remote boar", () => {
-    const remoteBoar = mapLayout.objects.find(
-      (entry: JsonObject) => entry.name === "Remote_mob_boar",
-    );
-    const movement = remoteBoar?.behaviors?.find(
-      (entry: JsonObject) => entry.name === "TopDownMovement",
-    );
+  it("prevents player controls from moving server monster visuals", () => {
+    for (const objectName of ["mob_hare", "mob_boar"]) {
+      const monsterObject = mapLayout.objects.find(
+        (entry: JsonObject) => entry.name === objectName,
+      );
+      const movement = monsterObject?.behaviors?.find(
+        (entry: JsonObject) => entry.name === "TopDownMovement",
+      );
 
-    assert.ok(movement);
-    assert.strictEqual(movement.ignoreDefaultControls, true);
+      assert.ok(movement, `${objectName} must keep its movement behavior.`);
+      assert.strictEqual(movement.ignoreDefaultControls, true);
+    }
   });
 
   it("interpolates both remote monster types from authoritative positions", () => {
     const remoteMonsterGroup = findGroup(
       colyseusEvents,
-      "03 — COLYSEUS — REMOTE MONSTERS",
+      "03 — COLYSEUS — SERVER MONSTERS",
     );
     const blocks = findInlineBlocks(remoteMonsterGroup);
+    const interpolationBlock = blocks.find((block) =>
+      block.includes("__grandoriaMonsterInterpolation"),
+    );
 
-    assert.strictEqual(blocks.length, 1);
-    assert.match(blocks[0], /__grandoriaMonsterInterpolation/);
-    assert.match(blocks[0], /const interpolationSpeed = 12/);
-    assert.match(blocks[0], /distance > 96/);
-    assert.match(blocks[0], /Math\.round\(visual\.getY\(\)\)/);
+    assert.ok(interpolationBlock);
+    assert.match(interpolationBlock, /const interpolationSpeed = 12/);
+    assert.match(interpolationBlock, /distance > 96/);
+    assert.match(interpolationBlock, /Math\.round\(visual\.getY\(\)\)/);
     assert.doesNotThrow(() => {
-      new Function("runtimeScene", "eventsFunctionContext", "gdjs", blocks[0]);
+      new Function(
+        "runtimeScene",
+        "eventsFunctionContext",
+        "gdjs",
+        interpolationBlock,
+      );
     });
   });
 
@@ -264,22 +275,18 @@ describe("GDevelop realtime migration closure", () => {
     );
   });
 
-  it("shows diagnostics from the current Colyseus state only", () => {
-    const diagnostics = findGroup(
+  it("reads realtime visuals from the current Colyseus state only", () => {
+    const realtimeSource = findInlineBlocks({
       colyseusEvents,
-      "06 — COLYSEUS — DIAGNOSTICS",
-    );
-    const blocks = findInlineBlocks(diagnostics);
+      extension: project.eventsFunctionsExtensions.find(
+        (entry: JsonObject) => entry.name === "GrandoriaColyseus",
+      ),
+    }).join("\n");
 
-    assert.ok(diagnostics);
-    assert.strictEqual(blocks.length, 1);
-    assert.match(blocks[0], /network\.syncedPlayers/);
-    assert.match(blocks[0], /network\.syncedMonsters/);
-    assert.match(blocks[0], /network\.syncedItems/);
-    assert.doesNotMatch(blocks[0], /Presence|RTDB|SharedMobs/);
-    assert.doesNotThrow(() => {
-      new Function("runtimeScene", "eventsFunctionContext", "gdjs", blocks[0]);
-    });
+    assert.match(realtimeSource, /syncedPlayers/);
+    assert.match(realtimeSource, /syncedMonsters/);
+    assert.match(realtimeSource, /syncedItems/);
+    assert.doesNotMatch(realtimeSource, /Presence|RTDB|SharedMobs/);
   });
 
   it("removes obsolete RTDB variables but keeps active Colyseus bridge variables", () => {

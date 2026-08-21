@@ -1,0 +1,209 @@
+{
+  "catalogSchemaVersion": 1,
+  "definitions": {
+    "quest_map1_south_path": {
+      "credit": {
+        "mode": "solo"
+      },
+      "description": "Arlen pediu que você investigue a estrada ao sul da vila e encontre Nara, a batedora.",
+      "dialogue": {
+        "active": "Siga para os Campos do Sul e encontre Nara.",
+        "completed": "Nara agora pode orientar sua investigação ao sul.",
+        "offer": "Há algo errado ao sul da vila. Siga a estrada e procure Nara, nossa batedora.",
+        "ready": "Você encontrou Nara. Fale com ela para continuar a investigação."
+      },
+      "initialState": "available",
+      "nextQuestId": "quest_map1_tracks_in_grass",
+      "objectives": [
+        {
+          "id": "reach_south_fields",
+          "order": 0,
+          "quantity": 1,
+          "targetId": "south_fields_01",
+          "type": "explore"
+        },
+        {
+          "id": "talk_to_nara",
+          "order": 1,
+          "quantity": 1,
+          "targetId": "npc_south_scout",
+          "type": "talk"
+        }
+      ],
+      "offerNpcId": "npc_village_guard",
+      "prerequisites": [],
+      "questId": "quest_map1_south_path",
+      "repeatable": false,
+      "rewards": {
+        "gem": 0,
+        "gold": 5,
+        "items": [],
+        "xp": 25
+      },
+      "title": "O Caminho do Sul",
+      "trackingAllowed": true,
+      "turnIn": {
+        "targetId": "npc_south_scout",
+        "type": "npc"
+      }
+    },
+    "quest_map1_tracks_in_grass": {
+      "credit": {
+        "mode": "solo"
+      },
+      "description": "Nara quer descobrir o que está deixando a fauna inquieta. Cace coelhos e traga peles para análise.",
+      "dialogue": {
+        "active": "Cace três coelhos e mantenha três peles de coelho no inventário.",
+        "completed": "As marcas nas peles apontam para javalis agressivos mais ao sul.",
+        "offer": "Os coelhos estão fugindo de algo. Cace alguns e traga três peles para eu examinar.",
+        "ready": "As peles são suficientes. Entregue-as para eu verificar os rastros."
+      },
+      "initialState": "locked",
+      "nextQuestId": "quest_map1_tusks_on_path",
+      "objectives": [
+        {
+          "id": "hunt_hares",
+          "order": 0,
+          "quantity": 3,
+          "targetId": "mob_hare",
+          "type": "kill"
+        },
+        {
+          "id": "collect_rabbit_skin",
+          "order": 1,
+          "quantity": 3,
+          "targetId": "rabbit_skin",
+          "type": "collect"
+        },
+        {
+          "id": "deliver_rabbit_skin",
+          "order": 2,
+          "quantity": 3,
+          "targetId": "rabbit_skin",
+          "type": "deliver"
+        }
+      ],
+      "offerNpcId": "npc_south_scout",
+      "prerequisites": [
+        "quest_map1_south_path"
+      ],
+      "questId": "quest_map1_tracks_in_grass",
+      "repeatable": false,
+      "rewards": {
+        "gem": 0,
+        "gold": 10,
+        "items": [],
+        "xp": 50
+      },
+      "title": "Rastros na Relva",
+      "trackingAllowed": true,
+      "turnIn": {
+        "targetId": "npc_south_scout",
+        "type": "npc"
+      }
+    },
+    "quest_map1_tusks_on_path": {
+      "credit": {
+        "mode": "solo"
+      },
+      "description": "A rota ao sul está tomada por javalis agressivos. Abra caminho e confirme de onde eles estão vindo.",
+      "dialogue": {
+        "active": "Avance pela área dos javalis e derrote três deles.",
+        "completed": "Nara descobriu sinais de um guardião nas terras selvagens a oeste do cemitério.",
+        "offer": "Os javalis estão bloqueando a passagem. Entre no território deles e reduza a ameaça.",
+        "ready": "O caminho está mais seguro. Volte para Nara."
+      },
+      "initialState": "locked",
+      "nextQuestId": "quest_map1_wild_guardian",
+      "objectives": [
+        {
+          "id": "enter_boar_territory",
+          "order": 0,
+          "quantity": 1,
+          "targetId": "grassland_boar_01",
+          "type": "explore"
+        },
+        {
+          "id": "defeat_boars",
+          "order": 1,
+          "quantity": 3,
+          "targetId": "mob_boar",
+          "type": "kill"
+        }
+      ],
+      "offerNpcId": "npc_south_scout",
+      "prerequisites": [
+        "quest_map1_tracks_in_grass"
+      ],
+      "questId": "quest_map1_tusks_on_path",
+      "repeatable": false,
+      "rewards": {
+        "gem": 0,
+        "gold": 15,
+        "items": [],
+        "xp": 75
+      },
+      "title": "Presas no Caminho",
+      "trackingAllowed": true,
+      "turnIn": {
+        "targetId": "npc_south_scout",
+        "type": "npc"
+      }
+    },
+    "quest_map1_wild_guardian": {
+      "credit": {
+        "mode": "solo"
+      },
+      "description": "Um javali muito mais forte domina a clareira nas terras selvagens. Derrote-o e leve a notícia para Arlen.",
+      "dialogue": {
+        "active": "Entre nas Terras Selvagens e derrote o Guardião Selvagem.",
+        "completed": "Você concluiu o conteúdo atual de MAP_1. A vila está segura por enquanto. Continue explorando livremente.",
+        "offer": "Há um guardião nas terras selvagens, a oeste do cemitério. Derrote-o e depois informe Arlen na vila.",
+        "ready": "O guardião caiu. Volte para Arlen e conte o que aconteceu."
+      },
+      "initialState": "locked",
+      "nextQuestId": "",
+      "objectives": [
+        {
+          "id": "reach_deep_wilds",
+          "order": 0,
+          "quantity": 1,
+          "targetId": "deep_wilds_01",
+          "type": "explore"
+        },
+        {
+          "id": "defeat_wild_guardian",
+          "order": 1,
+          "quantity": 1,
+          "targetId": "mob_boar_guardian",
+          "type": "kill"
+        }
+      ],
+      "offerNpcId": "npc_south_scout",
+      "prerequisites": [
+        "quest_map1_tusks_on_path"
+      ],
+      "questId": "quest_map1_wild_guardian",
+      "repeatable": false,
+      "rewards": {
+        "gem": 0,
+        "gold": 25,
+        "items": [],
+        "xp": 100
+      },
+      "title": "O Guardião Selvagem",
+      "trackingAllowed": true,
+      "turnIn": {
+        "targetId": "npc_village_guard",
+        "type": "npc"
+      }
+    }
+  },
+  "source": {
+    "project": {
+      "file": "RPG-2D-project-Grandoria-Colyseus-authoritative-inventory-equipment.json",
+      "sha256": "dc53a7d0c13a2825c96e8ede499537acc7b24f900a88c66c4f377aa90e5e9ed1",
+      "sizeBytes": 6390437
+    }
+  }
+}

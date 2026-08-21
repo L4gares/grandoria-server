@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { readdirSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,6 +7,21 @@ const SERVER_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const TEST_DIRECTORY = join(SERVER_ROOT, "test");
 const MOCHA_PATH = join(SERVER_ROOT, "node_modules", "mocha", "bin", "mocha.js");
 const forwardedArguments = process.argv.slice(2);
+
+const DEFAULT_GDEVELOP_PROJECT = resolve(
+  SERVER_ROOT,
+  "..",
+  "grandoria-game",
+  "RPG-2D-project-Grandoria-Colyseus-authoritative-inventory-equipment.json",
+);
+const testEnvironment = { ...process.env };
+
+if (!testEnvironment.GRANDORIA_GDEVELOP_PROJECT && existsSync(DEFAULT_GDEVELOP_PROJECT)) {
+  testEnvironment.GRANDORIA_GDEVELOP_PROJECT = DEFAULT_GDEVELOP_PROJECT;
+  console.log(
+    `[Grandoria tests] Using sibling GDevelop project: ${DEFAULT_GDEVELOP_PROJECT}`,
+  );
+}
 const testFiles = readdirSync(TEST_DIRECTORY, { withFileTypes: true })
   .filter((entry) => entry.isFile() && entry.name.endsWith(".test.ts"))
   .map((entry) => join(TEST_DIRECTORY, entry.name))
@@ -36,7 +51,7 @@ for (const testFile of testFiles) {
     ],
     {
       cwd: SERVER_ROOT,
-      env: process.env,
+      env: testEnvironment,
       stdio: "inherit",
     },
   );

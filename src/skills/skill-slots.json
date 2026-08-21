@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "slots": {
+    "slot_1": {
+      "enabled": true,
+      "inputAction": "Skill1",
+      "order": 1,
+      "slotId": "slot_1"
+    },
+    "slot_10": {
+      "enabled": true,
+      "inputAction": "",
+      "order": 10,
+      "slotId": "slot_10"
+    },
+    "slot_2": {
+      "enabled": true,
+      "inputAction": "Skill2",
+      "order": 2,
+      "slotId": "slot_2"
+    },
+    "slot_3": {
+      "enabled": true,
+      "inputAction": "Skill3",
+      "order": 3,
+      "slotId": "slot_3"
+    },
+    "slot_4": {
+      "enabled": true,
+      "inputAction": "",
+      "order": 4,
+      "slotId": "slot_4"
+    },
+    "slot_5": {
+      "enabled": true,
+      "inputAction": "",
+      "order": 5,
+      "slotId": "slot_5"
+    },
+    "slot_6": {
+      "enabled": true,
+      "inputAction": "",
+      "order": 6,
+      "slotId": "slot_6"
+    },
+    "slot_7": {
+      "enabled": true,
+      "inputAction": "",
+      "order": 7,
+      "slotId": "slot_7"
+    },
+    "slot_8": {
+      "enabled": true,
+      "inputAction": "",
+      "order": 8,
+      "slotId": "slot_8"
+    },
+    "slot_9": {
+      "enabled": true,
+      "inputAction": "",
+      "order": 9,
+      "slotId": "slot_9"
+    }
+  }
+}

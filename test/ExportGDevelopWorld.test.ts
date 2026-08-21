@@ -192,9 +192,10 @@ describe("MAP_1 deterministic GDevelop world exporter", () => {
     for (const [entries, getId] of [
       [artifact.collisionChannels, (entry: any) => entry.id],
       [artifact.bodyProfiles, (entry: any) => entry.id],
-      [artifact.combatGeometry.boarAttackMasks, (entry: any) => entry.id],
+      [artifact.combatGeometry.monsterAttackMasks, (entry: any) => entry.id],
       [artifact.anchors.recoveryEntries, (entry: any) => entry.id],
       [artifact.anchors.monsterSpawns, (entry: any) => entry.id],
+      [artifact.spawnRegions, (entry: any) => entry.id],
       [artifact.candidatePlayableRegion.candidates, (entry: any) => entry.id],
       [artifact.candidatePlayableRegion.rejectedRegions, (entry: any) => entry.id],
       [artifact.diagnostics.categorySummary, (entry: any) => entry.objectName],
@@ -223,10 +224,7 @@ describe("MAP_1 deterministic GDevelop world exporter", () => {
   });
 
   it("records canonical project and active resource hashes", () => {
-    assert.strictEqual(
-      artifact.source.project.sha256,
-      "536a93225f9e752b6316cb01342b873acea7f32564b6713eff75eae592f8e463",
-    );
+    assert.match(artifact.source.project.sha256, /^[a-f0-9]{64}$/);
     assert.strictEqual(artifact.source.project.sha256, hashFile(PROJECT_PATH));
 
     const expectedCoreHashes = new Map([
@@ -636,7 +634,7 @@ describe("MAP_1 deterministic GDevelop world exporter", () => {
   it("exports the shared stable hare body", () => {
     const hare = findBodyProfile(artifact, "mob_hare");
 
-    assert.deepStrictEqual(hare.aliases, ["Remote_mob_hare", "mob_hare"]);
+    assert.deepStrictEqual(hare.aliases, ["mob_hare"]);
     assert.deepStrictEqual(hare.movementBody.sourceOrigin, {
       x: 15.5,
       y: 26.5,
@@ -647,14 +645,17 @@ describe("MAP_1 deterministic GDevelop world exporter", () => {
       { x: 7, y: 2.5 },
       { x: -6.5, y: 2.5 },
     ]);
-    assert.strictEqual(hare.verification.verifiedFrameCountPerSource, 100);
-    assert.strictEqual(hare.verification.stableAcrossAllFrames, true);
+    assert.strictEqual(hare.verification.verifiedFrameCount, 100);
+    assert.strictEqual(
+      hare.verification.stableMovementBodyDecision,
+      "stable_across_all_frames",
+    );
   });
 
   it("exports the baseline boar movement body", () => {
     const boar = findBodyProfile(artifact, "mob_boar");
 
-    assert.deepStrictEqual(boar.aliases, ["Remote_mob_boar", "mob_boar"]);
+    assert.deepStrictEqual(boar.aliases, ["mob_boar"]);
     assert.deepStrictEqual(boar.movementBody.sourceOrigin, {
       x: 16.5,
       y: 25.5,
@@ -665,16 +666,18 @@ describe("MAP_1 deterministic GDevelop world exporter", () => {
       { x: 5.5, y: -3.5 },
       { x: -6.5, y: -3.5 },
     ]);
-    assert.strictEqual(boar.verification.baselineFrameCountPerSource, 116);
+    assert.strictEqual(boar.verification.baselineFrameCount, 116);
     assert.strictEqual(
       boar.verification.stableMovementBodyDecision,
-      "verified_baseline_rectangle",
+      "dominant_baseline_with_attack_only_variants",
     );
   });
 
   it("keeps boar attack masks separate from movement body", () => {
     const boar = findBodyProfile(artifact, "mob_boar");
-    const attacks = artifact.combatGeometry.boarAttackMasks;
+    const attacks = artifact.combatGeometry.monsterAttackMasks.filter(
+      (attack: any) => attack.monsterType === "mob_boar",
+    );
 
     assert.deepStrictEqual(
       attacks.map((attack: any) => attack.direction),
@@ -733,52 +736,70 @@ describe("MAP_1 deterministic GDevelop world exporter", () => {
     assert.strictEqual(entry.validation.overlapsBlockingCollider, false);
   });
 
-  it("validates the exact hare and boar spawn anchors", () => {
-    const spawns = artifact.anchors.monsterSpawns;
-
+  it("exports the exact Stage 4 spawn regions", () => {
+    assert.deepStrictEqual(artifact.anchors.monsterSpawns, []);
     assert.deepStrictEqual(
-      spawns.map((spawn: any) => ({
-        bodyProfileId: spawn.bodyProfileId,
-        direction: spawn.direction,
-        id: spawn.id,
-        mapId: spawn.mapId,
-        x: spawn.x,
-        y: spawn.y,
+      artifact.spawnRegions.map((region: any) => ({
+        bounds: region.bounds,
+        enabled: region.enabled,
+        id: region.id,
+        mapId: region.mapId,
+        maxAlive: region.maxAlive,
+        mobType: region.mobType,
+        questRegionId: region.questRegionId,
+        respawnSeconds: region.respawnSeconds,
+        spawnPadding: region.spawnPadding,
       })),
       [
         {
-          bodyProfileId: "mob_boar",
-          direction: "down",
-          id: "map1_boar_001",
+          bounds: {
+            maxX: 532.5,
+            maxY: 1332.5,
+            minX: 417.5,
+            minY: 1187.5,
+          },
+          enabled: true,
+          id: "deep_wilds_guardian_01",
           mapId: "MAP_1",
-          x: 144,
-          y: 1056,
+          maxAlive: 1,
+          mobType: "mob_boar_guardian",
+          questRegionId: "deep_wilds_01",
+          respawnSeconds: 15,
+          spawnPadding: 8,
         },
         {
-          bodyProfileId: "mob_hare",
-          direction: "down",
-          id: "map1_hare_001",
+          bounds: {
+            maxX: 330.5,
+            maxY: 1291.5,
+            minX: 111.5,
+            minY: 1110.5,
+          },
+          enabled: true,
+          id: "grassland_boar_01",
           mapId: "MAP_1",
-          x: 168,
-          y: 968,
+          maxAlive: 5,
+          mobType: "mob_boar",
+          questRegionId: "south_fields_01",
+          respawnSeconds: 10,
+          spawnPadding: 0,
+        },
+        {
+          bounds: {
+            maxX: 317,
+            maxY: 1035.5,
+            minX: 103,
+            minY: 854.5,
+          },
+          enabled: true,
+          id: "grassland_hare_01",
+          mapId: "MAP_1",
+          maxAlive: 3,
+          mobType: "mob_hare",
+          questRegionId: "south_fields_01",
+          respawnSeconds: 10,
+          spawnPadding: 0,
         },
       ],
-    );
-    spawns.forEach((spawn: any) => {
-      assert.strictEqual(spawn.validation.finiteCoordinates, true);
-      assert.strictEqual(spawn.validation.validForEveryCandidate, true);
-      assert.strictEqual(spawn.validation.overlapsBlockingCollider, false);
-    });
-
-    assert.deepStrictEqual(
-      spawns.find((spawn: any) => spawn.id === "map1_hare_001").worldBody
-        .aabb,
-      { maxX: 175, maxY: 970.5, minX: 161.5, minY: 958.5 },
-    );
-    assert.deepStrictEqual(
-      spawns.find((spawn: any) => spawn.id === "map1_boar_001").worldBody
-        .aabb,
-      { maxX: 149.5, maxY: 1052.5, minX: 137.5, minY: 1041 },
     );
   });
 

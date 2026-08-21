@@ -5,13 +5,17 @@ import { ColyseusTestServer, boot } from "@colyseus/testing";
 
 import appConfig from "../src/app.config.js";
 import { MyRoom } from "../src/rooms/MyRoom.js";
+import { installTestAuthentication } from "./TestAuthentication.js";
 
 const ROOM_NAME = "my_room";
 const MAP_ID = "MAP_1";
 const FIXED_TIME_STEP_MS = 1000 / 60;
 const ATTACK_HIT_TICKS = 15;
-const ATTACK_FINISH_TICKS_AFTER_HIT = 5;
-const HARE_ID = "map1_hare_001";
+const ATTACK_FINISH_TICKS_AFTER_HIT =
+  Math.ceil(1_500 / FIXED_TIME_STEP_MS) - ATTACK_HIT_TICKS + 1;
+const HARE_ID = "grassland_hare_01__001";
+
+installTestAuthentication();
 
 const DEFAULT_JOIN_OPTIONS = {
   playerUid: "test-player",
@@ -29,6 +33,8 @@ type PublicMyRoom = {
 
 type TestableMyRoom = PublicMyRoom & {
   fixedTick(deltaTime: number): void;
+  persistPlayerInventory(...args: unknown[]): Promise<void>;
+  persistPlayerProgression(...args: unknown[]): Promise<void>;
   worldItemRandom: () => number;
 };
 
@@ -93,22 +99,40 @@ describe("MyRoom authoritative shared world items", () => {
 
     room.setSimulationInterval();
 
-    const client = await colyseus.connectTo(room, {
+    for (const monsterId of room.state.monsters.keys()) {
+      if (monsterId !== HARE_ID) {
+        room.state.monsters.delete(monsterId);
+      }
+    }
+
+    const hare = room.state.monsters.get(HARE_ID);
+
+    assert.ok(hare);
+
+    const joinOptions = {
       ...DEFAULT_JOIN_OPTIONS,
+      x: hare.x - 18,
+      y: hare.y,
+      direction: "right",
       ...overrides,
-    });
+    };
+
+    const client = await colyseus.connectTo(room, joinOptions);
     const testRoom = room as unknown as TestableMyRoom;
 
+    testRoom.persistPlayerInventory = async () => {};
+    testRoom.persistPlayerProgression = async () => {};
     testRoom.worldItemRandom = () => 0.5;
 
     return {
       client,
+      joinOptions,
       room: testRoom,
     };
   }
 
   it("creates inventory drops from the authoritative player position", async () => {
-    const { client, room } = await createJoinedRoom();
+    const { client, joinOptions, room } = await createJoinedRoom();
 
     const result = await sendAndReceive(
       room,
@@ -139,8 +163,8 @@ describe("MyRoom authoritative shared world items", () => {
       assert.strictEqual(item.quantity, 1);
       assert.strictEqual(item.mapId, MAP_ID);
       assert.strictEqual(item.source, "inventory_drop");
-      assert.strictEqual(item.x, DEFAULT_JOIN_OPTIONS.x);
-      assert.strictEqual(item.y, DEFAULT_JOIN_OPTIONS.y);
+      assert.strictEqual(item.x, Math.round(joinOptions.x));
+      assert.strictEqual(item.y, Math.round(joinOptions.y));
       assert.strictEqual(item.createdBy, DEFAULT_JOIN_OPTIONS.playerUid);
     }
 
@@ -249,10 +273,16 @@ describe("MyRoom authoritative shared world items", () => {
 
   it("allows only one of two players to collect the same item", async () => {
     const { client: firstClient, room } = await createJoinedRoom();
+    const firstPlayer = room.state.players.get(firstClient.sessionId);
+
+    assert.ok(firstPlayer);
+
     const secondClient = await colyseus.connectTo(room as unknown as MyRoom, {
       ...DEFAULT_JOIN_OPTIONS,
       characterId: "second-character",
       playerUid: "second-player",
+      x: firstPlayer.x,
+      y: firstPlayer.y,
     });
     const dropResult = await sendAndReceive(
       room,
@@ -298,10 +328,23 @@ describe("MyRoom authoritative shared world items", () => {
   it("creates the configured hare drop exactly once on lethal damage", async () => {
     const { client, room } = await createJoinedRoom();
     const randomValues = [0, 0, 0];
+    const hare = room.state.monsters.get(HARE_ID);
+
+    assert.ok(hare);
 
     room.worldItemRandom = () => randomValues.shift() ?? 0;
 
     for (let hit = 0; hit < 2; hit += 1) {
+      const player = room.state.players.get(client.sessionId);
+      const currentHare = room.state.monsters.get(HARE_ID);
+
+      assert.ok(player);
+      assert.ok(currentHare);
+
+      player.x = currentHare.x - 18;
+      player.y = currentHare.y;
+      player.direction = "right";
+
       const serverReceived = room.waitForMessage("attack");
 
       client.send("attack", { monsterId: HARE_ID });
@@ -318,14 +361,23 @@ describe("MyRoom authoritative shared world items", () => {
     const [sharedItemID, item] = [...room.state.items.entries()][0];
 
     assert.ok(sharedItemID.startsWith(`mob_drop_${HARE_ID}_`));
-    assert.strictEqual(item.itemID, "rabbit_foot");
+    assert.strictEqual(item.itemID, "rabbit_skin");
     assert.strictEqual(item.type, "Materials");
     assert.strictEqual(item.subType, "Monster Parts");
     assert.strictEqual(item.source, "mob_drop");
     assert.strictEqual(item.monsterType, "mob_hare");
     assert.strictEqual(item.monsterId, HARE_ID);
     assert.strictEqual(item.rarity, "common");
-    assert.strictEqual(item.x, 168);
-    assert.strictEqual(item.y, 968);
+    const deadHare = room.state.monsters.get(HARE_ID);
+
+    assert.ok(deadHare);
+
+    const dropDistance = Math.hypot(
+      item.x - deadHare.x,
+      item.y - deadHare.y,
+    );
+
+    assert.ok(dropDistance >= 10);
+    assert.ok(dropDistance <= 36);
   });
 });

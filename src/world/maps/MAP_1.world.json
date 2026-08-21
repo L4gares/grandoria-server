@@ -239,6 +239,75 @@
     },
     {
       "aliases": [
+        "mob_boar_guardian"
+      ],
+      "id": "mob_boar_guardian",
+      "movementBody": {
+        "originRelativePolygons": [
+          [
+            {
+              "x": -6.5,
+              "y": -15
+            },
+            {
+              "x": 5.5,
+              "y": -15
+            },
+            {
+              "x": 5.5,
+              "y": -3.5
+            },
+            {
+              "x": -6.5,
+              "y": -3.5
+            }
+          ]
+        ],
+        "polygonAnalysis": [
+          {
+            "classification": "convex",
+            "signedArea": 138,
+            "sourceIndex": 0
+          }
+        ],
+        "sourceOrigin": {
+          "x": 16.5,
+          "y": 25.5
+        },
+        "sourcePolygons": [
+          [
+            {
+              "x": 10,
+              "y": 10.5
+            },
+            {
+              "x": 22,
+              "y": 10.5
+            },
+            {
+              "x": 22,
+              "y": 22
+            },
+            {
+              "x": 10,
+              "y": 22
+            }
+          ]
+        ],
+        "type": "polygon_set"
+      },
+      "verification": {
+        "baselineFrameCount": 116,
+        "changedAttackMaskCount": 4,
+        "sourceObjects": [
+          "mob_boar_guardian"
+        ],
+        "stableMovementBodyDecision": "dominant_baseline_with_attack_only_variants",
+        "verifiedFrameCount": 120
+      }
+    },
+    {
+      "aliases": [
         "mob_hare"
       ],
       "id": "mob_hare",
@@ -12160,6 +12229,338 @@
         "verifiedAliases": [
           "mob_boar"
         ]
+      },
+      {
+        "direction": "down",
+        "frameIndex": 3,
+        "id": "mob_boar_guardian:attack:down:3",
+        "monsterType": "mob_boar_guardian",
+        "originRelativePolygons": [
+          [
+            {
+              "x": 3.5,
+              "y": -10.5
+            },
+            {
+              "x": 10,
+              "y": -19
+            },
+            {
+              "x": 14,
+              "y": -19
+            },
+            {
+              "x": 15,
+              "y": -9
+            },
+            {
+              "x": 13.5,
+              "y": -2.5
+            },
+            {
+              "x": 11.5,
+              "y": 1.5
+            },
+            {
+              "x": 9.5,
+              "y": 5.5
+            },
+            {
+              "x": 5.5,
+              "y": 5.5
+            },
+            {
+              "x": -6,
+              "y": 5
+            },
+            {
+              "x": -7,
+              "y": 3
+            },
+            {
+              "x": -8.5,
+              "y": -0.5
+            }
+          ]
+        ],
+        "role": "combat_attack_frame_mask",
+        "sourceAnimation": "attack_down",
+        "sourceOrigin": {
+          "x": 16.5,
+          "y": 25.5
+        },
+        "sourcePolygons": [
+          [
+            {
+              "x": 20,
+              "y": 15
+            },
+            {
+              "x": 26.5,
+              "y": 6.5
+            },
+            {
+              "x": 30.5,
+              "y": 6.5
+            },
+            {
+              "x": 31.5,
+              "y": 16.5
+            },
+            {
+              "x": 30,
+              "y": 23
+            },
+            {
+              "x": 28,
+              "y": 27
+            },
+            {
+              "x": 26,
+              "y": 31
+            },
+            {
+              "x": 22,
+              "y": 31
+            },
+            {
+              "x": 10.5,
+              "y": 30.5
+            },
+            {
+              "x": 9.5,
+              "y": 28.5
+            },
+            {
+              "x": 8,
+              "y": 25
+            }
+          ]
+        ],
+        "verifiedAliases": [
+          "mob_boar_guardian"
+        ]
+      },
+      {
+        "direction": "left",
+        "frameIndex": 3,
+        "id": "mob_boar_guardian:attack:left:3",
+        "monsterType": "mob_boar_guardian",
+        "originRelativePolygons": [
+          [
+            {
+              "x": -11.5,
+              "y": 1
+            },
+            {
+              "x": -16.5,
+              "y": -3
+            },
+            {
+              "x": -16.5,
+              "y": -12.5
+            },
+            {
+              "x": -16.5,
+              "y": -19.5
+            },
+            {
+              "x": -13.5,
+              "y": -21
+            },
+            {
+              "x": -9,
+              "y": -10.5
+            },
+            {
+              "x": -5.5,
+              "y": -0.5
+            },
+            {
+              "x": -7,
+              "y": 1
+            }
+          ]
+        ],
+        "role": "combat_attack_frame_mask",
+        "sourceAnimation": "attack_left",
+        "sourceOrigin": {
+          "x": 16.5,
+          "y": 25.5
+        },
+        "sourcePolygons": [
+          [
+            {
+              "x": 5,
+              "y": 26.5
+            },
+            {
+              "x": 0,
+              "y": 22.5
+            },
+            {
+              "x": 0,
+              "y": 13
+            },
+            {
+              "x": 0,
+              "y": 6
+            },
+            {
+              "x": 3,
+              "y": 4.5
+            },
+            {
+              "x": 7.5,
+              "y": 15
+            },
+            {
+              "x": 11,
+              "y": 25
+            },
+            {
+              "x": 9.5,
+              "y": 26.5
+            }
+          ]
+        ],
+        "verifiedAliases": [
+          "mob_boar_guardian"
+        ]
+      },
+      {
+        "direction": "right",
+        "frameIndex": 3,
+        "id": "mob_boar_guardian:attack:right:3",
+        "monsterType": "mob_boar_guardian",
+        "originRelativePolygons": [
+          [
+            {
+              "x": 11.5,
+              "y": -21
+            },
+            {
+              "x": 15.5,
+              "y": -19.5
+            },
+            {
+              "x": 15.5,
+              "y": -5
+            },
+            {
+              "x": 11,
+              "y": -0.5
+            },
+            {
+              "x": 5.5,
+              "y": 0.5
+            }
+          ]
+        ],
+        "role": "combat_attack_frame_mask",
+        "sourceAnimation": "attack_right",
+        "sourceOrigin": {
+          "x": 16.5,
+          "y": 25.5
+        },
+        "sourcePolygons": [
+          [
+            {
+              "x": 28,
+              "y": 4.5
+            },
+            {
+              "x": 32,
+              "y": 6
+            },
+            {
+              "x": 32,
+              "y": 20.5
+            },
+            {
+              "x": 27.5,
+              "y": 25
+            },
+            {
+              "x": 22,
+              "y": 26
+            }
+          ]
+        ],
+        "verifiedAliases": [
+          "mob_boar_guardian"
+        ]
+      },
+      {
+        "direction": "up",
+        "frameIndex": 3,
+        "id": "mob_boar_guardian:attack:up:3",
+        "monsterType": "mob_boar_guardian",
+        "originRelativePolygons": [
+          [
+            {
+              "x": -11,
+              "y": -25.5
+            },
+            {
+              "x": 7.5,
+              "y": -25.5
+            },
+            {
+              "x": 8.5,
+              "y": -15.5
+            },
+            {
+              "x": 4.5,
+              "y": -8.5
+            },
+            {
+              "x": -11.5,
+              "y": -7.5
+            },
+            {
+              "x": -14,
+              "y": -13
+            }
+          ]
+        ],
+        "role": "combat_attack_frame_mask",
+        "sourceAnimation": "attack_up",
+        "sourceOrigin": {
+          "x": 16.5,
+          "y": 25.5
+        },
+        "sourcePolygons": [
+          [
+            {
+              "x": 5.5,
+              "y": 0
+            },
+            {
+              "x": 24,
+              "y": 0
+            },
+            {
+              "x": 25,
+              "y": 10
+            },
+            {
+              "x": 21,
+              "y": 17
+            },
+            {
+              "x": 5,
+              "y": 18
+            },
+            {
+              "x": 2.5,
+              "y": 12.5
+            }
+          ]
+        ],
+        "verifiedAliases": [
+          "mob_boar_guardian"
+        ]
       }
     ],
     "playerUnarmedAttackHitboxes": {
@@ -13378,11 +13779,139 @@
     }
   },
   "mapId": "MAP_1",
+  "npcs": [
+    {
+      "displayName": "Nara",
+      "id": "npc_south_scout",
+      "interactionRadius": 72,
+      "mapId": "MAP_1",
+      "objectName": "npc_south_scout",
+      "source": {
+        "instancePersistentUuid": "b1e1b539-6ec9-4608-bd51-a126e1eb9384",
+        "layer": "",
+        "objectName": "npc_south_scout"
+      },
+      "x": 135,
+      "y": 791
+    },
+    {
+      "displayName": "npc_trader_equipments",
+      "id": "npc_trader_equipments",
+      "interactionRadius": 64,
+      "mapId": "MAP_1",
+      "objectName": "npc_trader_equipments",
+      "source": {
+        "instancePersistentUuid": "0e4708ec-dd85-4ca0-844d-87ccd94f292e",
+        "layer": "",
+        "objectName": "npc_trader_equipments"
+      },
+      "x": 515,
+      "y": 343
+    },
+    {
+      "displayName": "npc_trader_merchant",
+      "id": "npc_trader_merchant",
+      "interactionRadius": 64,
+      "mapId": "MAP_1",
+      "objectName": "npc_trader_merchant",
+      "source": {
+        "instancePersistentUuid": "a81e08b1-0d68-4b3a-9eef-b8aaed1f6688",
+        "layer": "",
+        "objectName": "npc_trader_merchant"
+      },
+      "x": 393,
+      "y": 378
+    },
+    {
+      "displayName": "npc_trader_mystic",
+      "id": "npc_trader_mystic",
+      "interactionRadius": 64,
+      "mapId": "MAP_1",
+      "objectName": "npc_trader_mystic",
+      "source": {
+        "instancePersistentUuid": "f7bec0f8-4616-49d2-a449-1460ceb93442",
+        "layer": "",
+        "objectName": "npc_trader_mystic"
+      },
+      "x": 678,
+      "y": 420
+    },
+    {
+      "displayName": "Arlen",
+      "id": "npc_village_guard",
+      "interactionRadius": 72,
+      "mapId": "MAP_1",
+      "objectName": "npc_village_guard",
+      "source": {
+        "instancePersistentUuid": "3b8a5882-ace8-4af9-b8c1-3ebd7b957ebe",
+        "layer": "",
+        "objectName": "npc_village_guard"
+      },
+      "x": 585,
+      "y": 650
+    }
+  ],
+  "questRegions": [
+    {
+      "accessQuestId": "quest_map1_tusks_on_path",
+      "associatedQuestId": "quest_map1_wild_guardian",
+      "bounds": {
+        "maxX": 605,
+        "maxY": 1430,
+        "minX": 395,
+        "minY": 1160
+      },
+      "displayName": "Terras Selvagens",
+      "id": "deep_wilds_01",
+      "mapId": "MAP_1",
+      "musicKey": "",
+      "pointOfInterestIds": [],
+      "regionType": "hostile",
+      "sourceInstancePersistentUuid": "a726d6a2-41d5-4431-873c-0781ad777b34",
+      "sourceObjectName": "QuestRegion"
+    },
+    {
+      "accessQuestId": "",
+      "associatedQuestId": "quest_map1_south_path",
+      "bounds": {
+        "maxX": 505,
+        "maxY": 1369,
+        "minX": 75,
+        "minY": 769
+      },
+      "displayName": "Campos do Sul",
+      "id": "south_fields_01",
+      "mapId": "MAP_1",
+      "musicKey": "",
+      "pointOfInterestIds": [],
+      "regionType": "hostile",
+      "sourceInstancePersistentUuid": "ead77724-e7c7-40c7-8ba2-b44507424f2a",
+      "sourceObjectName": "QuestRegion"
+    },
+    {
+      "accessQuestId": "",
+      "associatedQuestId": "quest_map1_south_path",
+      "bounds": {
+        "maxX": 740,
+        "maxY": 720,
+        "minX": 300,
+        "minY": 250
+      },
+      "displayName": "Vila",
+      "id": "village_01",
+      "mapId": "MAP_1",
+      "musicKey": "",
+      "pointOfInterestIds": [],
+      "regionType": "safe",
+      "sourceInstancePersistentUuid": "b6244a87-79ae-4d28-b0e8-e8eb0899dbc2",
+      "sourceObjectName": "QuestRegion"
+    }
+  ],
   "source": {
     "project": {
       "file": "RPG-2D-project-Grandoria-Colyseus-authoritative-inventory-equipment.json",
-      "sha256": "5e4c1a90a7d23232a548581a325e62eec174ab9e35dde3c3f0e5113e3656193d",
-      "sizeBytes": 5789515
+      "sha256": "dc53a7d0c13a2825c96e8ede499537acc7b24f900a88c66c4f377aa90e5e9ed1",
+      "sizeBytes": 6390437
     },
     "resources": [
       {
@@ -13522,6 +14051,35 @@
   "spawnRegions": [
     {
       "bounds": {
+        "maxX": 548.5,
+        "maxY": 1364.5,
+        "minX": 433.5,
+        "minY": 1219.5
+      },
+      "enabled": true,
+      "id": "deep_wilds_guardian_01",
+      "mapId": "MAP_1",
+      "maxAlive": 1,
+      "mobType": "mob_boar_guardian",
+      "position": {
+        "x": 491,
+        "y": 1292
+      },
+      "questRegionId": "deep_wilds_01",
+      "respawnSeconds": 15,
+      "size": {
+        "height": 145,
+        "width": 115
+      },
+      "source": {
+        "instancePersistentUuid": "ad2dfbcd-3625-4800-8114-e6f56077e041",
+        "layer": "spawn_mobs",
+        "objectName": "regionSpawn_deep_wilds_guardian"
+      },
+      "spawnPadding": 8
+    },
+    {
+      "bounds": {
         "maxX": 330.5,
         "maxY": 1291.5,
         "minX": 111.5,
@@ -13536,6 +14094,7 @@
         "x": 221,
         "y": 1201
       },
+      "questRegionId": "south_fields_01",
       "respawnSeconds": 10,
       "size": {
         "height": 181,
@@ -13564,6 +14123,7 @@
         "x": 210,
         "y": 945
       },
+      "questRegionId": "south_fields_01",
       "respawnSeconds": 10,
       "size": {
         "height": 181,

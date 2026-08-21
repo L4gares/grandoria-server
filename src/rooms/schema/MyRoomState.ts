@@ -158,6 +158,9 @@ export class PlayerState extends Schema {
   characterId: string = "";
 
   @type("string")
+  classId: string = "";
+
+  @type("string")
   mapId: string = "";
 
   @type("number")
@@ -204,6 +207,14 @@ export class PlayerState extends Schema {
 
   @type([PlayerInventorySlotState])
   inventory = new ArraySchema<PlayerInventorySlotState>();
+
+  /*
+   * Slot IDs are data-driven by skill-slots.json. A MapSchema keeps the
+   * character loadout extensible without hardcoding slot_1...slot_10 here.
+   * Values are SkillIDs, or "empty" while no skill is equipped.
+   */
+  @type({ map: "string" })
+  skillLoadout = new MapSchema<string>();
 }
 
 export class MonsterState extends Schema {

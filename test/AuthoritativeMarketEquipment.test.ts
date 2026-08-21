@@ -1616,7 +1616,10 @@ describe("authoritative market and equipment flow", () => {
     assert.doesNotMatch(connectCode, /set_max_health_result/);
     assert.doesNotMatch(syncLocalEquipmentCode, /set_max_health/);
     assert.doesNotMatch(syncLocalEquipmentCode, /lastRequestedMaxHealth/);
-    assert.match(applyLocalPlayerStateCode, /authoritative health/);
+    assert.match(
+      applyLocalPlayerStateCode,
+      /authoritative progression, attributes, and health/,
+    );
     assert.match(applyLocalPlayerStateCode, /getChild\("CurrentHP"\)/);
     assert.match(applyLocalPlayerStateCode, /getChild\("MaxHP"\)/);
 
@@ -1644,18 +1647,86 @@ describe("authoritative market and equipment flow", () => {
       interfaces.events,
       "MARKET — SELL ITEMS",
     );
+    const inventoryOpenCloseGroup = findNamedEvent(
+      interfaces.events,
+      "INVENTORY — OPEN AND CLOSE",
+    );
+    const marketOpenCloseGroup = findNamedEvent(
+      interfaces.events,
+      "MARKET — OPEN AND CLOSE WINDOW",
+    );
 
     assert.ok(marketBuyGroup);
     assert.ok(marketSaleGroup);
+    assert.ok(inventoryOpenCloseGroup);
+    assert.ok(marketOpenCloseGroup);
+
+    const inventoryEvents = Array.isArray(inventoryOpenCloseGroup.events)
+      ? inventoryOpenCloseGroup.events as Record<string, unknown>[]
+      : [];
+    const genericInventoryCloseEvent = inventoryEvents.find((event) => {
+      const actions = Array.isArray(event.actions)
+        ? event.actions as Record<string, unknown>[]
+        : [];
+
+      return actions.some((action) => {
+        const actionType = (
+          action.type as Record<string, unknown> | undefined
+        )?.value;
+        const parameters = Array.isArray(action.parameters)
+          ? action.parameters
+          : [];
+
+        return (
+          actionType === "SetBooleanObjectVariable" &&
+          parameters[0] === "UI_inventory" &&
+          parameters[1] === "open" &&
+          parameters[2] === "False"
+        );
+      });
+    });
+
+    assert.ok(genericInventoryCloseEvent);
+
+    const genericInventoryCloseConditions = Array.isArray(
+      genericInventoryCloseEvent.conditions,
+    )
+      ? genericInventoryCloseEvent.conditions as Record<string, unknown>[]
+      : [];
+    const leavesMarketCloseForMarketHandler =
+      genericInventoryCloseConditions.some((condition) => {
+        const conditionType = (
+          condition.type as Record<string, unknown> | undefined
+        )?.value;
+        const parameters = Array.isArray(condition.parameters)
+          ? condition.parameters
+          : [];
+
+        return (
+          conditionType === "StringVariable" &&
+          parameters[0] === "Game_State" &&
+          parameters[1] === "!=" &&
+          parameters[2] === '"MARKET"'
+        );
+      });
+
+    assert.ok(
+      leavesMarketCloseForMarketHandler,
+      "The generic inventory close event must not consume the market close click.",
+    );
 
     const serializedPurchase = JSON.stringify(marketBuyGroup);
     const serializedSale = JSON.stringify(marketSaleGroup);
+    const serializedMarketOpenClose = JSON.stringify(marketOpenCloseGroup);
 
     assert.match(serializedPurchase, /GrandoriaColyseus::BuyItem/);
     assert.doesNotMatch(serializedPurchase, /inventory\[A\]/);
     assert.doesNotMatch(serializedPurchase, /player_Gold","-"/);
     assert.doesNotMatch(serializedPurchase, /player_Gem","-"/);
     assert.match(serializedSale, /GrandoriaColyseus::SellItem/);
+    assert.match(serializedMarketOpenClose, /SetStringVariable/);
+    assert.match(serializedMarketOpenClose, /Game_State/);
+    assert.match(serializedMarketOpenClose, /GAME/);
 
     const localSaleMutations: Record<string, unknown>[] = [];
 

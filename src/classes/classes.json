@@ -1,0 +1,20 @@
+{
+  "classes": {
+    "warrior": {
+      "baseAttributes": {
+        "Agility": 2,
+        "Armor": 5,
+        "AttackPower": 6,
+        "CriticalChance": 2,
+        "HealingPower": 0,
+        "MagicPower": 0,
+        "Regeneration": 3,
+        "Vitality": 6
+      },
+      "classId": "warrior",
+      "displayName": "Warrior",
+      "skillIds": []
+    }
+  },
+  "schemaVersion": 2
+}
